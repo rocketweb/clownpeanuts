@@ -1,0 +1,15 @@
+title = "ClownPeanuts gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Intentional fake tokens used in deception fixtures and legacy commits."
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''AKIAFAKEWEB''',
+  '''AKIAFAKEBACKUP''',
+  '''fakewebsecret''',
+  '''fake-npm-token''',
+  '''CP_FAKE_[A-Z0-9_]+''',
+]

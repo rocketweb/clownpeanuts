@@ -1,0 +1,2 @@
+"""SSH emulator plugin."""
+

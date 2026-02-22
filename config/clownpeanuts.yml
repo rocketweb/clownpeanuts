@@ -1,0 +1,307 @@
+environment: development
+network:
+  segmentation_mode: vxlan
+  require_segmentation: true
+  enforce_runtime: true
+  verify_host_firewall: false
+  verify_docker_network: false
+  required_docker_network: clownpeanuts
+  apply_firewall_rules: false
+  firewall_dry_run: true
+  allow_outbound: false
+  allowed_egress:
+    - redis
+session:
+  backend: redis
+  redis_url: redis://:${CP_REDIS_PASSWORD}@redis:6379/0
+  key_prefix: clownpeanuts
+  ttl_seconds: 86400
+  connect_timeout_seconds: 1.0
+  required: false
+event_bus:
+  backend: redis
+  redis_url: redis://:${CP_REDIS_PASSWORD}@redis:6379/1
+  channel_prefix: clownpeanuts
+  connect_timeout_seconds: 1.0
+  required: false
+api:
+  docs_enabled: false
+  cors_allow_origins:
+    - "http://127.0.0.1:3000"
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3001"
+    - "http://localhost:3001"
+  cors_allow_credentials: false
+  intel_report_cache_ttl_seconds: ${CP_API_INTEL_REPORT_CACHE_TTL_SECONDS:-1.5}
+  trusted_hosts: ["*"]
+  auth_enabled: ${CP_API_AUTH_ENABLED:-false}
+  auth_operator_tokens:
+    - "${CP_API_OPERATOR_TOKEN:-}"
+  auth_viewer_tokens:
+    - "${CP_API_VIEWER_TOKEN:-}"
+  allow_unauthenticated_health: ${CP_API_ALLOW_UNAUTHENTICATED_HEALTH:-true}
+  rate_limit_enabled: ${CP_API_RATE_LIMIT_ENABLED:-false}
+  rate_limit_requests_per_minute: ${CP_API_RATE_LIMIT_REQUESTS_PER_MINUTE:-240}
+  rate_limit_burst: ${CP_API_RATE_LIMIT_BURST:-60}
+  rate_limit_exempt_paths:
+    - "/health"
+  max_request_body_bytes: ${CP_API_MAX_REQUEST_BODY_BYTES:-262144}
+logging:
+  level: INFO
+  format: ecs_json
+  sink: stdout
+  service_name: clownpeanuts
+  siem:
+    enabled: false
+    transport: http
+    endpoint: ""
+    timeout_seconds: 2.0
+    headers: {}
+    batch_size: 50
+    flush_interval_seconds: 1.0
+    max_retries: 3
+    retry_backoff_seconds: 0.5
+    max_queue_size: 5000
+    dead_letter_path: logs/siem-dead-letter.ndjson
+engine:
+  enabled: true
+  backend: rule-based
+  model: rule-based
+  template_fast_path: true
+  context_seed: clownpeanuts
+  local_llm:
+    enabled: false
+    provider: "lmstudio"
+    endpoint: "http://masoc:1234/v1/chat/completions"
+    model: "llama3.2:3b"
+    api_key: ""
+    timeout_seconds: 1.2
+    max_response_chars: 700
+    temperature: 0.2
+    failure_threshold: 3
+    cooldown_seconds: 15.0
+narrative:
+  enabled: false
+  world_seed: clownpeanuts
+  entity_count: 120
+  per_tenant_worlds: true
+bandit:
+  enabled: false
+  algorithm: thompson
+  exploration_floor: 0.1
+  reward_weights:
+    dwell_time: 1.0
+    cross_protocol_pivot: 1.2
+    technique_novelty: 1.3
+    alert_quality: 0.8
+    analyst_feedback: 1.0
+  safety_caps:
+    max_arm_exposure_percent: 0.7
+    cooldown_seconds: 30.0
+    denylist: []
+theater:
+  enabled: false
+  rollout_mode: observe-only
+  max_live_sessions: 75
+  recommendation_cooldown_seconds: 8.0
+alerts:
+  enabled: false
+  min_severity: medium
+  throttle_seconds: 60
+  destinations:
+    - name: webhook-default
+      type: webhook
+      enabled: false
+      endpoint: ""
+    - name: pagerduty-default
+      type: pagerduty
+      enabled: false
+      endpoint: "https://events.pagerduty.com/v2/enqueue"
+      token: ""
+      metadata:
+        source: clownpeanuts
+    - name: email-default
+      type: email
+      enabled: false
+      endpoint: "smtp://localhost:25"
+      metadata:
+        from: "clownpeanuts@localhost"
+        to: "soc@example.local"
+threat_intel:
+  enabled: false
+  strategy: balanced
+  seasonal_month_override: null
+  rotation_interval_seconds: 3600
+  feed_urls: []
+multi_tenant:
+  enabled: false
+  default_tenant: default
+  tenants:
+    - id: default
+      display_name: Default Tenant
+      enabled: true
+      tags: [production]
+      service_overrides: {}
+templates:
+  enabled: false
+  paths: []
+red_team:
+  enabled: false
+  label: red_team
+  suppress_external_alerts: true
+  internal_cidrs:
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+ecosystem:
+  enabled: false
+  drift_alert_threshold: 0.7
+  witchbait_credentials: []
+  jit:
+    enabled: false
+    pool_size: 10
+    ttl_idle_seconds: 14400
+    ttl_max_seconds: 86400
+agents:
+  pripyatsprings:
+    enabled: false
+    backend: ""
+    default_toxicity: 2
+    tracking_domain: ""
+    canary_dns_domain: ""
+    tracking_server_port: 8443
+    level3_acknowledgment: ""
+    per_emulator_overrides: {}
+    store_path: ""
+  adlibs:
+    enabled: false
+    backend: ""
+    ldap_uri: ""
+    ldap_bind_dn: ""
+    ldap_bind_password_env: ""
+    base_dn: ""
+    target_ou: ""
+    fake_users: 8
+    fake_service_accounts: 5
+    fake_groups: 3
+    bloodhound_paths: true
+    event_log_source: "wef"
+    witchbait_integration: true
+    store_path: ""
+  dirtylaundry:
+    enabled: false
+    backend: ""
+    matching_window_seconds: 90
+    match_threshold: 0.75
+    skill_adaptive: true
+    auto_theater_on_apt: true
+    profile_store_path: ""
+    max_profiles: 10000
+    max_sessions_per_profile: 500
+    max_notes_per_profile: 200
+    sharing:
+      enabled: false
+      endpoint: ""
+      export_interval_hours: 24
+      request_timeout_seconds: 5.0
+      headers: {}
+services:
+  - name: ssh
+    module: clownpeanuts.services.ssh.emulator
+    enabled: true
+    listen_host: 0.0.0.0
+    ports: [2222]
+    config:
+      banner: "SSH-2.0-OpenSSH_8.4p1 Debian-5"
+      hostname: "ip-172-31-44-9"
+      auth_failures_before_success: 1
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 20
+      tarpit_max_delay_ms: 180
+      tarpit_ramp_events: 10
+  - name: http-admin
+    module: clownpeanuts.services.http.emulator
+    enabled: true
+    listen_host: 0.0.0.0
+    ports: [18080]
+    config:
+      tarpit_enabled: true
+      backup_stream_chunks: 40
+      backup_chunk_size_bytes: 512
+      slowdrip_min_delay_ms: 80
+      slowdrip_max_delay_ms: 250
+      slowdrip_jitter_ratio: 0.0
+      infinite_exfil_enabled: true
+      infinite_exfil_path: "/backup/live.sql.gz"
+      infinite_exfil_chunk_size_bytes: 768
+      infinite_exfil_max_chunks: 0
+      auth_failures_before_success: 1
+      auth_delay_pattern_ms: [120, 450, 900]
+      auth_delay_jitter_ratio: 0.15
+      query_tarpit_enabled: true
+      query_tarpit_min_delay_ms: 120
+      query_tarpit_max_delay_ms: 700
+      query_tarpit_jitter_ratio: 0.2
+      query_tarpit_max_page_size: 50
+      query_tarpit_estimated_total: 4200
+  - name: redis-db
+    module: clownpeanuts.services.database.redis_emulator
+    enabled: true
+    listen_host: 0.0.0.0
+    ports: [6380]
+    config:
+      server_version: "7.0.12"
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 15
+      tarpit_max_delay_ms: 140
+      tarpit_ramp_events: 8
+  - name: mysql-db
+    module: clownpeanuts.services.database.mysql_emulator
+    enabled: true
+    listen_host: 0.0.0.0
+    ports: [13306]
+    config:
+      server_version: "8.0.36-clownpeanuts"
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 20
+      tarpit_max_delay_ms: 200
+      tarpit_ramp_events: 12
+  - name: postgres-db
+    module: clownpeanuts.services.database.postgres_emulator
+    enabled: true
+    listen_host: 0.0.0.0
+    ports: [15432]
+    config:
+      server_version: "15.4-clownpeanuts"
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 20
+      tarpit_max_delay_ms: 200
+      tarpit_ramp_events: 12
+  - name: mongo-db
+    module: clownpeanuts.services.database.mongo_emulator
+    enabled: false
+    listen_host: 0.0.0.0
+    ports: [27018]
+    config:
+      server_version: "6.0.12-clownpeanuts"
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 20
+      tarpit_max_delay_ms: 220
+      tarpit_ramp_events: 14
+  - name: memcached-db
+    module: clownpeanuts.services.database.memcached_emulator
+    enabled: false
+    listen_host: 0.0.0.0
+    ports: [11212]
+    config:
+      server_version: "1.6.24-clownpeanuts"
+      adaptive_tarpit_enabled: true
+      tarpit_min_delay_ms: 15
+      tarpit_max_delay_ms: 120
+      tarpit_ramp_events: 8
+  - name: dummy
+    module: clownpeanuts.services.dummy.emulator
+    enabled: false
+    listen_host: 0.0.0.0
+    ports: [2022]
+    config:
+      greeting: "welcome to clownpeanuts"

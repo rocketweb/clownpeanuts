@@ -1,0 +1,84 @@
+services:
+  clownpeanuts:
+    build: .
+    container_name: clownpeanuts-core
+    command: ["clownpeanuts", "up", "--config", "/app/clownpeanuts/config/defaults.yml"]
+    depends_on:
+      - redis
+    ports:
+      - "2222:2222"
+      - "8080:8080"
+      - "6380:6380"
+      - "13306:13306"
+      - "15432:15432"
+      - "27018:27018"
+      - "11212:11212"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CP_REDIS_PASSWORD=${CP_REDIS_PASSWORD:?Must set CP_REDIS_PASSWORD}
+      - CP_API_AUTH_ENABLED=true
+      - CP_API_OPERATOR_TOKEN=${CP_API_OPERATOR_TOKEN:?Must set CP_API_OPERATOR_TOKEN}
+    mem_limit: ${CP_CORE_MEM_LIMIT:-1024m}
+    cpus: ${CP_CORE_CPUS:-1.0}
+    pids_limit: ${CP_CORE_PIDS_LIMIT:-512}
+    profiles:
+      - core
+
+  redis:
+    image: redis:7-alpine
+    container_name: clownpeanuts-redis
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${CP_REDIS_PASSWORD:?Must set CP_REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    mem_limit: ${CP_REDIS_MEM_LIMIT:-256m}
+    cpus: ${CP_REDIS_CPUS:-0.5}
+    pids_limit: ${CP_REDIS_PIDS_LIMIT:-256}
+
+  api:
+    build: .
+    container_name: clownpeanuts-api
+    command: ["clownpeanuts", "api", "--config", "/app/clownpeanuts/config/defaults.yml", "--host", "0.0.0.0", "--port", "8099", "--start-services"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CP_REDIS_PASSWORD=${CP_REDIS_PASSWORD:?Must set CP_REDIS_PASSWORD}
+    ports:
+      - "8099:8099"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=2).read()"]
+      interval: 8s
+      timeout: 3s
+      retries: 5
+    mem_limit: ${CP_API_MEM_LIMIT:-768m}
+    cpus: ${CP_API_CPUS:-0.8}
+    pids_limit: ${CP_API_PIDS_LIMIT:-384}
+    profiles:
+      - ops
+
+  dashboard:
+    build:
+      context: ./dashboard
+    container_name: clownpeanuts-dashboard
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_CLOWNPEANUTS_API=http://api:8099
+      - NEXT_PUBLIC_CLOWNPEANUTS_WS=ws://api:8099/ws/events
+      - CLOWNPEANUTS_API_TOKEN=${CP_API_OPERATOR_TOKEN:?Must set CP_API_OPERATOR_TOKEN}
+    ports:
+      - "3000:3000"
+    mem_limit: ${CP_DASHBOARD_MEM_LIMIT:-512m}
+    cpus: ${CP_DASHBOARD_CPUS:-0.6}
+    pids_limit: ${CP_DASHBOARD_PIDS_LIMIT:-256}
+    profiles:
+      - ops

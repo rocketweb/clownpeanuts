@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clownpeanuts"
+version = "0.1.0"
+description = "AI-powered adaptive honeypot framework"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "PolyForm Noncommercial 1.0.0" }
+authors = [
+  { name = "Matt MacDougall" },
+  { name = "Rocket Web" }
+]
+dependencies = [
+  "PyYAML>=6.0.1",
+  "redis>=5.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30"
+]
+
+[project.scripts]
+clownpeanuts = "clownpeanuts.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["clownpeanuts*"]
+
+[tool.setuptools.package-data]
+"clownpeanuts.config" = ["*.yml"]
