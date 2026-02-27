@@ -20,6 +20,6 @@ This directory contains current-state, operator-facing documentation for ClownPe
 4. **Public Extension Boundary**
 5. **Agent Handoff**
 
-Cross-repo note: the shared multi-product operator control-plane (Overview/Deception/Sentry/Orchestration) lives in [SquirrelOps](https://github.com/mattmacrocket/squirrelops). ClownPeanuts-local dashboard paths remain documented here for runtime-focused workflows and compatibility.
+Cross-repo note: the shared multi-product operator control-plane (Overview/Deception/Sentry/Orchestration) lives in [SquirrelOps](https://github.com/rocketweb/squirrelops). ClownPeanuts-local dashboard paths remain documented here for runtime-focused workflows and compatibility.
 
 Integration note: optional integrations are additive. Core ClownPeanuts runtime behavior and baseline ClownPeanuts + SquirrelOps + PingTing operation remain supported without them.

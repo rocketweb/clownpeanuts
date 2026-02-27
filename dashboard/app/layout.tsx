@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/theater" className="cp-rail-link">
                 Theater
               </Link>
-              <a href="https://github.com/mattmacrocket/clownpeanuts" target="_blank" rel="noreferrer" className="cp-rail-link">
+              <a href="https://github.com/rocketweb/clownpeanuts" target="_blank" rel="noreferrer" className="cp-rail-link">
                 Repo
               </a>
             </nav>

@@ -142,7 +142,7 @@ For multi-product operations (ClownPeanuts + PingTing + orchestration actions), 
 
 - Control-plane dashboard: `squirrelops/apps/controlplane-dashboard`
 - Control-plane API: `squirrelops/apps/controlplane-api`
-- Migration/current-state docs: [squirrelops/docs/controlplane-migration.md](https://github.com/mattmacrocket/squirrelops/blob/main/docs/controlplane-migration.md) and [squirrelops/docs/current-state.md](https://github.com/mattmacrocket/squirrelops/blob/main/docs/current-state.md)
+- Migration/current-state docs: [squirrelops/docs/controlplane-migration.md](https://github.com/rocketweb/squirrelops/blob/main/docs/controlplane-migration.md) and [squirrelops/docs/current-state.md](https://github.com/rocketweb/squirrelops/blob/main/docs/current-state.md)
 
 In practice:
 
@@ -161,7 +161,7 @@ Optional integrations are additive by design. ClownPeanuts remains fully support
 
 ```bash
 # Clone and set up the Python environment
-git clone git@github.com:mattmacrocket/clownpeanuts.git
+git clone git@github.com:rocketweb/clownpeanuts.git
 cd clownpeanuts
 python3 -m venv .venv
 source .venv/bin/activate

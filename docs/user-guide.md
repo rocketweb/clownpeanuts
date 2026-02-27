@@ -88,7 +88,7 @@ ClownPeanuts binds to several ports. Make sure nothing else is using them, or ad
 ### 4.1 Clone and Install
 
 ```bash
-git clone git@github.com:mattmacrocket/clownpeanuts.git
+git clone git@github.com:rocketweb/clownpeanuts.git
 cd clownpeanuts
 python3 -m venv .venv
 source .venv/bin/activate
