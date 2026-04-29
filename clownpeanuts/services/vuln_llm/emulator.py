@@ -1,13 +1,15 @@
-"""Fake LLM endpoint emulator — M0 skeleton.
+"""Fake LLM endpoint emulator.
 
-Exposes an OpenAI-compatible HTTP API (`POST /v1/chat/completions`) that
-echoes the last user message back as the assistant response. No real
-inference, no trap layer, no persona pack — those land in later milestones.
+Exposes an OpenAI-compatible HTTP API (`POST /v1/chat/completions`).
+
+If `pack_path` is set in service config, loads the .hdl persona pack and
+uses its trap layer (classifier → token factory → canary templates) to
+route requests. Without a pack configured, runs in echo mode (M0 fallback).
 
 Per turn, emits ClownPeanuts events via `runtime.event_logger.emit(...)`
 using the canonical CP finding shape — NOT a custom HDL schema.
 
-Spec: docs/HUEYDEWEYLOUIE-SPEC.md §10 M0.
+Spec: docs/HUEYDEWEYLOUIE-SPEC.md §10.
 """
 
 from __future__ import annotations
@@ -15,12 +17,17 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from clownpeanuts.config.schema import ServiceConfig
 from clownpeanuts.core.logging import get_logger
+from clownpeanuts.personas.reader import PackError, PackReader
+from clownpeanuts.personas.traps.layer import RouteDecision, TrapLayer
+from clownpeanuts.personas.trust import TrustStore
 from clownpeanuts.services.base import ServiceEmulator
 
 
@@ -81,6 +88,12 @@ class Emulator(ServiceEmulator):
         self._bound_port: int | None = None
         self._max_concurrent_connections = 128
         self._model_name = self._DEFAULT_MODEL_NAME
+        # Pack-loading state. Populated in start() if pack_path is configured.
+        self._pack_reader: PackReader | None = None
+        self._trap_layer: TrapLayer | None = None
+        # Per-session turn counter for canary template rotation.
+        self._turn_counter: dict[str, int] = defaultdict(int)
+        self._turn_counter_lock = threading.Lock()
 
     # ------- Required ServiceEmulator interface -------
 
@@ -114,6 +127,11 @@ class Emulator(ServiceEmulator):
     async def start(self, config: ServiceConfig) -> None:
         self._config = config
         self.apply_runtime_config(config)
+        # Pack loading (M2): if config has pack_path, load + verify, then
+        # construct the trap layer. If not, run in echo-only mode (M0 fallback).
+        pack_path_str = str((config.config or {}).get("pack_path", "") or "")
+        if pack_path_str:
+            self._load_pack(Path(pack_path_str))
         host = config.listen_host
         port = config.ports[0] if config.ports else self.default_ports[0]
 
@@ -156,6 +174,10 @@ class Emulator(ServiceEmulator):
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._pack_reader is not None:
+            self._pack_reader.close()
+            self._pack_reader = None
+            self._trap_layer = None
         self.running = False
         self.logger.info("vuln-llm service stopped", extra={"service": self.name})
         if self.runtime:
@@ -165,6 +187,70 @@ class Emulator(ServiceEmulator):
                 action="service_stop",
                 event_type="end",
             )
+
+    def _load_pack(self, pack_path: Path) -> None:
+        """Load + verify a .hdl persona pack and construct the trap layer.
+
+        On failure: log error, leave trap layer unloaded (service falls
+        back to M0 echo mode rather than refusing to start).
+        """
+        try:
+            reader = PackReader.open(pack_path)
+        except PackError as e:
+            self.logger.error(
+                "vuln-llm pack open failed; falling back to echo mode",
+                extra={"service": self.name, "payload": {"path": str(pack_path), "error": str(e)}},
+            )
+            return
+        try:
+            reader.verify(TrustStore.default())
+        except PackError as e:
+            self.logger.error(
+                "vuln-llm pack verification failed; falling back to echo mode",
+                extra={"service": self.name, "payload": {"path": str(pack_path), "error": str(e)}},
+            )
+            reader.close()
+            return
+
+        manifest = reader.manifest()
+        # Use the pack's id as the canary namespace so issued tokens are
+        # attributable to this persona deployment.
+        namespace = self._sanitize_namespace(manifest.pack.id)
+        try:
+            trap = TrapLayer.from_pack(reader.work_path(), namespace=namespace)
+        except Exception as e:
+            self.logger.error(
+                "vuln-llm trap layer init failed; falling back to echo mode",
+                extra={"service": self.name, "payload": {"path": str(pack_path), "error": str(e)}},
+            )
+            reader.close()
+            return
+
+        self._pack_reader = reader
+        self._trap_layer = trap
+        self._model_name = f"{manifest.pack.id}-{manifest.pack.version}"
+        self.logger.info(
+            "vuln-llm pack loaded",
+            extra={
+                "service": self.name,
+                "payload": {
+                    "pack_id": manifest.pack.id,
+                    "pack_version": manifest.pack.version,
+                    "model_name": self._model_name,
+                    "token_templates": trap.tokens.template_ids(),
+                    "canary_templates": len(trap.canaries),
+                    "classifier_rules": len(trap.classifier.rules),
+                },
+            },
+        )
+
+    @staticmethod
+    def _sanitize_namespace(pack_id: str) -> str:
+        """Reduce pack id to CP's canary namespace alphabet `[a-z0-9-]`."""
+        cleaned = "".join(
+            c if c.isalnum() or c == "-" else "-" for c in pack_id.lower()
+        ).strip("-")
+        return cleaned or "hdl"
 
     async def handle_connection(self, conn: dict[str, Any]) -> dict[str, Any]:
         # Programmatic connection injection (used by tests / templates).
@@ -266,7 +352,7 @@ class Emulator(ServiceEmulator):
             self._respond_error(handler, 400, "messages must be a non-empty list")
             return
 
-        # Echo the last user message back as assistant content.
+        # Last user message (used by both echo and trap-layer paths).
         last_user_content = ""
         for msg in reversed(messages):
             if (
@@ -284,6 +370,12 @@ class Emulator(ServiceEmulator):
         client_addr = getattr(handler, "client_address", None) or ("unknown", 0)
         source_ip, source_port = str(client_addr[0]), int(client_addr[1])
 
+        # Per-session monotonically-increasing turn counter (for canary
+        # template rotation). Reset is implicit on emulator restart.
+        with self._turn_counter_lock:
+            self._turn_counter[session_id] += 1
+            turn_n = self._turn_counter[session_id]
+
         # Per-turn finding: turn_received
         self._emit_session_event(
             session_id=session_id,
@@ -295,7 +387,17 @@ class Emulator(ServiceEmulator):
                 "messages_count": len(messages),
                 "model": str(request.get("model", "")),
                 "stream": bool(request.get("stream", False)),
+                "turn_n": turn_n,
             },
+        )
+
+        # Pick the assistant content via trap layer (if pack loaded) or echo.
+        assistant_content, route_meta = self._generate_response(
+            session_id=session_id,
+            source_ip=source_ip,
+            source_port=source_port,
+            turn_n=turn_n,
+            last_user_text=last_user_content,
         )
 
         # Build OpenAI-compatible response.
@@ -305,7 +407,7 @@ class Emulator(ServiceEmulator):
             for m in messages
             if isinstance(m, dict)
         )
-        completion_tokens = max(1, len(last_user_content) // 4)
+        completion_tokens = max(1, len(assistant_content) // 4)
         completion = {
             "id": response_id,
             "object": "chat.completion",
@@ -314,7 +416,7 @@ class Emulator(ServiceEmulator):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": last_user_content},
+                    "message": {"role": "assistant", "content": assistant_content},
                     "finish_reason": "stop",
                 }
             ],
@@ -336,19 +438,102 @@ class Emulator(ServiceEmulator):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-        # Per-turn finding: turn_responded
+        # Per-turn finding: turn_responded (with route metadata)
+        responded_payload: dict[str, Any] = {
+            "response_id": response_id,
+            "completion_chars": len(assistant_content),
+            "completion_tokens_est": completion_tokens,
+            "turn_n": turn_n,
+        }
+        responded_payload.update(route_meta)
         self._emit_session_event(
             session_id=session_id,
             source_ip=source_ip,
             source_port=source_port,
             action="turn_responded",
             message="vuln-llm turn responded",
+            payload=responded_payload,
+        )
+
+    # ------- response generation: trap layer or echo -------
+
+    def _generate_response(
+        self,
+        *,
+        session_id: str,
+        source_ip: str,
+        source_port: int,
+        turn_n: int,
+        last_user_text: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Return (assistant_content, route_metadata).
+
+        If trap layer is loaded, route through classifier → canary templates.
+        Otherwise, echo the user message back (M0 behavior; useful for smoke
+        tests when no pack is configured).
+        """
+        if self._trap_layer is None:
+            return last_user_text, {"route": "echo"}
+
+        decision: RouteDecision = self._trap_layer.route(
+            session_id=session_id,
+            turn_n=turn_n,
+            last_user_text=last_user_text,
+        )
+
+        # Emit a classifier_result finding regardless of route.
+        self._emit_session_event(
+            session_id=session_id,
+            source_ip=source_ip,
+            source_port=source_port,
+            action="classifier_result",
+            message="vuln-llm classifier verdict",
             payload={
-                "response_id": response_id,
-                "completion_chars": len(last_user_content),
-                "completion_tokens_est": completion_tokens,
+                "label": decision.verdict.label,
+                "score": decision.verdict.score,
+                "matched_rules": list(decision.verdict.matched_rules),
+                "route_action": decision.action,
             },
         )
+
+        if decision.action == "canary_response":
+            for issued in decision.issued_tokens:
+                self._emit_session_event(
+                    session_id=session_id,
+                    source_ip=source_ip,
+                    source_port=source_port,
+                    action="canary_issued",
+                    message="vuln-llm canary token issued",
+                    payload={
+                        "template_id": issued.template_id,
+                        "canary_type": issued.canary_type,
+                        "token_id": issued.token_id,
+                        "canary_template": decision.template_name,
+                    },
+                )
+            return decision.response_text, {
+                "route": "canary",
+                "verdict": decision.verdict.label,
+                "score": decision.verdict.score,
+                "template": decision.template_name,
+                "tokens_issued": len(decision.issued_tokens),
+            }
+
+        if decision.action == "escalate_probing":
+            # M2 minimum: probing falls through to echo (Tier-2 prompt
+            # template work lives in M3+ alongside inference).
+            return last_user_text, {
+                "route": "probing_echo",
+                "verdict": decision.verdict.label,
+                "score": decision.verdict.score,
+            }
+
+        # passthrough
+        return last_user_text, {
+            "route": "passthrough",
+            "verdict": decision.verdict.label,
+            "score": decision.verdict.score,
+        }
 
     # ------- Helpers -------
 
