@@ -25,6 +25,16 @@ _TECHNIQUE_CATALOG: tuple[dict[str, str], ...] = (
     {"technique_id": "T1021", "technique_name": "Remote Services", "tactic": "Lateral Movement"},
     {"technique_id": "T1005", "technique_name": "Data from Local System", "tactic": "Collection"},
     {"technique_id": "T1041", "technique_name": "Exfiltration Over C2 Channel", "tactic": "Exfiltration"},
+    # LLM attack mappings (HDL vuln_llm service). Cross-walk:
+    #   classifier_result(jailbreak_attempt | exploit_chain) → T1190
+    #   tool_called(execute_query)                          → T1059
+    #   tool_called(read_file)                              → T1005
+    #   tool_called(list_secrets)                           → T1552
+    #   tool_called(query_user_db)                          → T1213
+    #   canary_issued(*)                                    → T1606
+    {"technique_id": "T1552", "technique_name": "Unsecured Credentials", "tactic": "Credential Access"},
+    {"technique_id": "T1213", "technique_name": "Data from Information Repositories", "tactic": "Collection"},
+    {"technique_id": "T1606", "technique_name": "Forge Web Credentials", "tactic": "Credential Access"},
 )
 
 
@@ -95,6 +105,10 @@ def map_event_to_techniques(event: dict[str, Any]) -> list[TechniqueMatch]:
                 confidence=0.45,
             )
         )
+
+    # ---------- LLM attack mappings (HDL vuln_llm service) ----------
+    if service == "vuln_llm":
+        matches.extend(_map_vuln_llm_event(action=action, payload=payload))
 
     unique: dict[str, TechniqueMatch] = {}
     for match in matches:
@@ -198,3 +212,103 @@ def _extract_command_text(payload: dict[str, Any]) -> str:
         elif isinstance(value, list):
             fragments.extend(str(item).lower() for item in value)
     return " ".join(fragments)
+
+
+# ---------- vuln_llm → ATT&CK mapping ----------
+#
+# HDL's vuln_llm emulator emits CP-native events with these actions:
+#   - classifier_result: payload.label ∈ {benign, jailbreak_attempt, exploit_chain}
+#   - canary_issued:     payload.canary_type ∈ {aws, code, http, dns, email}
+#   - tool_called:       payload.tool ∈ {query_user_db, read_file, execute_query,
+#                                         list_secrets}
+#   - turn_received / turn_responded / backend_error / service_start / service_stop
+#
+# We map adversary intent (not the emulator's reactive deception) to ATT&CK:
+# the user input *attempts* the technique; the canary/tool response is the
+# decoy. So a `jailbreak_attempt` verdict means the attacker is trying to
+# Exploit a Public-Facing Application (the LLM), and a `tool_called` event
+# means the attacker successfully induced a tool invocation (still
+# synthetic, but the intent matches the technique).
+
+
+def _map_vuln_llm_event(
+    *, action: str, payload: dict[str, Any]
+) -> list[TechniqueMatch]:
+    matches: list[TechniqueMatch] = []
+
+    if action == "classifier_result":
+        label = str(payload.get("label", ""))
+        if label in {"jailbreak_attempt", "exploit_chain"}:
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1190",
+                    technique_name="Exploit Public-Facing Application",
+                    tactic="Initial Access",
+                    confidence=0.78 if label == "exploit_chain" else 0.62,
+                )
+            )
+        if label == "exploit_chain":
+            # Multi-stage chains imply the attacker is also trying scripted
+            # execution against the model's tool surface.
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1059",
+                    technique_name="Command and Scripting Interpreter",
+                    tactic="Execution",
+                    confidence=0.55,
+                )
+            )
+
+    elif action == "tool_called":
+        tool = str(payload.get("tool", ""))
+        if tool == "execute_query":
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1059",
+                    technique_name="Command and Scripting Interpreter",
+                    tactic="Execution",
+                    confidence=0.71,
+                )
+            )
+        elif tool == "read_file":
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1005",
+                    technique_name="Data from Local System",
+                    tactic="Collection",
+                    confidence=0.68,
+                )
+            )
+        elif tool == "list_secrets":
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1552",
+                    technique_name="Unsecured Credentials",
+                    tactic="Credential Access",
+                    confidence=0.84,
+                )
+            )
+        elif tool == "query_user_db":
+            matches.append(
+                TechniqueMatch(
+                    technique_id="T1213",
+                    technique_name="Data from Information Repositories",
+                    tactic="Collection",
+                    confidence=0.66,
+                )
+            )
+
+    elif action == "canary_issued":
+        # Whenever a canary is handed to the attacker, they've now received
+        # a forged credential they think is real. Even if they don't use it
+        # in this session, capture the intent.
+        matches.append(
+            TechniqueMatch(
+                technique_id="T1606",
+                technique_name="Forge Web Credentials",
+                tactic="Credential Access",
+                confidence=0.50,
+            )
+        )
+
+    return matches

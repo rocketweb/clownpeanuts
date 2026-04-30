@@ -88,6 +88,44 @@ _SIGNATURES: tuple[ToolSignature, ...] = (
             re.compile(r"bash\s+-i", re.IGNORECASE),
         ),
     ),
+    # ---------- LLM-attack fingerprints (HDL vuln_llm) ----------
+    # These match against classifier rule names emitted in
+    # `payload.matched_rules` of vuln_llm `classifier_result` events. Each
+    # rule corresponds to a recognizable adversary technique against an
+    # LLM endpoint.
+    ToolSignature(
+        tool="llm-jailbreak-dan",
+        category="exploitation",
+        confidence=0.85,
+        patterns=(
+            re.compile(r"\bdan_pattern\b", re.IGNORECASE),
+            re.compile(r"\bdo anything now\b", re.IGNORECASE),
+        ),
+    ),
+    ToolSignature(
+        tool="llm-prompt-extraction",
+        category="recon",
+        confidence=0.83,
+        patterns=(re.compile(r"\bsystem_prompt_extraction\b", re.IGNORECASE),),
+    ),
+    ToolSignature(
+        tool="llm-role-coercion",
+        category="exploitation",
+        confidence=0.78,
+        patterns=(re.compile(r"\broleplay_injection\b", re.IGNORECASE),),
+    ),
+    ToolSignature(
+        tool="llm-encoding-evasion",
+        category="exploitation",
+        confidence=0.74,
+        patterns=(re.compile(r"\bencoding_evasion\b", re.IGNORECASE),),
+    ),
+    ToolSignature(
+        tool="llm-tool-exploit",
+        category="execution",
+        confidence=0.80,
+        patterns=(re.compile(r"\btool_exploit_marker\b", re.IGNORECASE),),
+    ),
 )
 
 
