@@ -519,6 +519,46 @@ class Emulator(ServiceEmulator):
                 "tokens_issued": len(decision.issued_tokens),
             }
 
+        if decision.action == "tool_response":
+            # tool_called event
+            self._emit_session_event(
+                session_id=session_id,
+                source_ip=source_ip,
+                source_port=source_port,
+                action="tool_called",
+                message="vuln-llm tool synthesizer invoked",
+                payload={
+                    "tool": decision.tool_name,
+                    "verdict": decision.verdict.label,
+                    "score": decision.verdict.score,
+                    "failed": decision.tool_failed,
+                },
+            )
+            # canary_issued events (one per token)
+            for issued in decision.issued_tokens:
+                self._emit_session_event(
+                    session_id=session_id,
+                    source_ip=source_ip,
+                    source_port=source_port,
+                    action="canary_issued",
+                    message="vuln-llm canary token issued (tool synthesis)",
+                    payload={
+                        "template_id": issued.template_id,
+                        "canary_type": issued.canary_type,
+                        "token_id": issued.token_id,
+                        "tool": decision.tool_name,
+                    },
+                )
+            return decision.response_text, {
+                "route": "tool",
+                "tool": decision.tool_name,
+                "verdict": decision.verdict.label,
+                "score": decision.verdict.score,
+                "tool_failed": decision.tool_failed,
+                "tokens_issued": len(decision.issued_tokens),
+                "latency_ms": decision.latency_ms,
+            }
+
         if decision.action == "escalate_probing":
             # M2 minimum: probing falls through to echo (Tier-2 prompt
             # template work lives in M3+ alongside inference).
