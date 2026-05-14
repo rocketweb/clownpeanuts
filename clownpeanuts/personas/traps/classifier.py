@@ -189,12 +189,35 @@ class HeuristicClassifier:
             text = text[: self.MAX_INPUT_CHARS]
 
         # Stage 1: regex heuristics with additive scoring.
-        stage1_score = 0.0
+        # Track pack and operator (X-018) contributions SEPARATELY so
+        # an operator can't saturate the score to exploit_chain by
+        # themselves — that would silently route benign traffic to
+        # canary on any deployment where a careless operator adds a
+        # `regex: "."` `score: 1.0` rule. We cap operator-contribution
+        # at `self.threshold` so:
+        #
+        #   - Pack alone (e.g. 0.7) → "jailbreak_attempt" as before
+        #   - Operator alone (≤ threshold) → at most "probing" if
+        #     threshold-capped, or "jailbreak_attempt" if exactly at
+        #     threshold. Operator can still legitimately catch
+        #     tenant-specific jailbreaks no pack rule covers.
+        #   - Operator + pack (≥ threshold + something) → can reach
+        #     exploit_chain when BOTH agree — that's the design.
+        #
+        # Operator rules are identified by the `tenant:` name prefix
+        # set in `_compile_rules`.
+        pack_score = 0.0
+        operator_score_raw = 0.0
         matched: list[str] = []
         for rule in self.rules:
             if rule.pattern.search(text):
-                stage1_score += rule.score
+                if rule.name.startswith("tenant:"):
+                    operator_score_raw += rule.score
+                else:
+                    pack_score += rule.score
                 matched.append(rule.name)
+        operator_score = min(operator_score_raw, self.threshold)
+        stage1_score = pack_score + operator_score
 
         # Stage 2: optional ML score. Combined via max so either stage
         # firing above threshold routes through the trap layer.

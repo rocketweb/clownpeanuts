@@ -322,3 +322,100 @@ def test_session_world_population_is_idempotent() -> None:
     # Extending preserves prefix
     c = w.populate_users(5)
     assert c[:3] == a
+
+
+# ---------- cache-strips-issued_tokens regression (deferred audit fix) ----------
+
+
+def test_read_file_cache_hit_replays_issued_tokens() -> None:
+    """Regression: the file cache stored only the body. On cache hit,
+    the caller returned the cached body with `issued_tokens=()` even
+    though the body contained rendered canary strings — so the
+    attacker saw the canary, but CP intel recorded ZERO token
+    issuance on retry. Now cache stores (body, issued_tokens) tuples
+    and replays both."""
+    pack = _ensure_pack()
+    with PackReader.open(pack) as reader:
+        reader.verify(TrustStore.default())
+        trap = TrapLayer.from_pack(reader.work_path(), namespace="ns-cache")
+    # First call: cache miss, real issuance
+    d1 = trap.route(
+        session_id="sess-cache-1",
+        turn_n=1,
+        last_user_text="read_file /home/admin/.env",
+    )
+    assert d1.action == "tool_response"
+    n1 = len(d1.issued_tokens)
+    assert n1 >= 1, "first call must issue at least one canary token"
+
+    # Second call (same session, same path): cache HIT
+    d2 = trap.route(
+        session_id="sess-cache-1",
+        turn_n=2,
+        last_user_text="read_file /home/admin/.env",
+    )
+    assert d2.action == "tool_response"
+    # Body must match (deterministic cached render)
+    assert d2.response_text == d1.response_text
+    # Critical: issued_tokens count must match — NOT empty
+    assert len(d2.issued_tokens) == n1, (
+        f"cache hit must replay issued_tokens; first call issued {n1}, "
+        f"cache hit issued {len(d2.issued_tokens)} (was 0 pre-fix)"
+    )
+
+
+# ---------- biased token pick (deferred audit fix) ----------
+
+
+def test_embed_token_pick_distribution_is_independent_of_threshold() -> None:
+    """Regression: previously `pick = bucket % len(embed_tokens)` reused
+    the same bucket value that was also used to decide whether to
+    embed at all. That made the distribution biased when
+    `int(embed_rate*100)` didn't divide cleanly into len(embed_tokens).
+    Now uses a separate "pick" salt for an independent hash."""
+    from collections import Counter
+    from clownpeanuts.personas.traps.tools import _maybe_issue, ToolConfig
+    from clownpeanuts.personas.traps.world import SessionWorld
+    from clownpeanuts.personas.traps.tokens import TokenFactory
+
+    pack = _ensure_pack()
+    with PackReader.open(pack) as reader:
+        reader.verify(TrustStore.default())
+        factory = TokenFactory.from_pack(reader.work_path(), namespace="ns-pick")
+
+    cfg = ToolConfig(
+        name="distrib-test",
+        enabled=True,
+        description="test",
+        embed_tokens=("api_key_aws_style", "db_connection_string", "api_key_openai_style", "internal_url"),
+        embed_rate=0.50,  # 50% of calls embed
+        extra={},
+    )
+
+    # Sample many distinct session/path combos
+    picks: Counter[str] = Counter()
+    issued_count = 0
+    for i in range(400):
+        world = SessionWorld(session_id=f"sess-{i}")
+        tok = _maybe_issue(
+            cfg, factory, world,
+            session_id=f"sess-{i}",
+            decision_salt=f"path-{i}",
+        )
+        if tok is not None:
+            issued_count += 1
+            picks[tok.template_id] += 1
+
+    # Issuance rate should be ~50% (within statistical noise on 400 samples)
+    assert 150 < issued_count < 250, (
+        f"embed_rate=0.5 should yield ~200/400 issuances; got {issued_count}"
+    )
+    # Each template should be picked at least 15% of issuances —
+    # previously the bias could push one template's share below 5%
+    # depending on the bucket/len arithmetic.
+    for template_id in cfg.embed_tokens:
+        share = picks[template_id] / max(1, issued_count)
+        assert share >= 0.15, (
+            f"template {template_id} share {share:.2%} too low "
+            f"(distribution: {dict(picks)})"
+        )

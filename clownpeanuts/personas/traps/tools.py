@@ -172,8 +172,15 @@ def _maybe_issue(
     bucket = _embed_seed(world, cfg.name, decision_salt)
     if bucket >= int(cfg.embed_rate * 100):
         return None
-    # Pick which token template by hashing further
-    pick = bucket % len(cfg.embed_tokens)
+    # Pick which token template via an INDEPENDENT hash. The previous
+    # code did `pick = bucket % len(embed_tokens)` reusing the same
+    # bucket — which gave uneven distribution whenever
+    # `int(embed_rate*100)` wasn't a multiple of `len(embed_tokens)`.
+    # E.g. with embed_rate=0.30 (kept bucket ∈ [0,30)) and 4 tokens,
+    # buckets {0..29} mod 4 = {0:8, 1:8, 2:7, 3:7}. With 7 or 8
+    # tokens the bias is severe.
+    pick_seed = _embed_seed(world, cfg.name, decision_salt, "pick")
+    pick = pick_seed % len(cfg.embed_tokens)
     template_id = cfg.embed_tokens[pick]
     try:
         return factory.issue(template_id, session_id=session_id)
@@ -257,9 +264,16 @@ def _synth_read_file(
 
     # Stable result for repeated reads in the same session.
     # Uses the bounded cache accessor (LRU-evicted to bound memory).
+    # CRITICAL: re-emit the cached issued_tokens so CP intel
+    # correlation stays consistent across retries. Previously the
+    # cache hit returned the body but `issued_tokens=()` — attacker
+    # saw the canary string but CP recorded zero issuances.
     cached = world.cached_file(path)
     if cached is not None:
-        return ToolResponse(text=cached, latency_ms=60)
+        body, cached_tokens = cached
+        return ToolResponse(
+            text=body, issued_tokens=cached_tokens, latency_ms=60
+        )
 
     issued: list[IssuedToken] = []
 
@@ -301,8 +315,12 @@ def _synth_read_file(
             failed=True,
         )
 
-    world.cache_file(path, body)
-    return ToolResponse(text=body, issued_tokens=tuple(issued), latency_ms=110)
+    issued_tuple = tuple(issued)
+    # Co-cache the body AND the issued_tokens so repeat reads return
+    # a consistent ToolResponse (same body, same canary correlation
+    # in CP intel).
+    world.cache_file(path, body, issued_tuple)
+    return ToolResponse(text=body, issued_tokens=issued_tuple, latency_ms=110)
 
 
 def _passwd_template(world: SessionWorld) -> str:

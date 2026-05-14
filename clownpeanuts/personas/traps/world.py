@@ -133,19 +133,38 @@ class SessionWorld:
 
     # --- bounded cache accessors (call instead of touching dicts directly) ---
 
-    def cache_file(self, path: str, body: str) -> None:
+    def cache_file(
+        self,
+        path: str,
+        body: str,
+        issued_tokens: tuple[Any, ...] = (),
+    ) -> None:
+        """Co-cache the rendered body AND the tokens that were issued
+        when it was generated. The previous shape (body only) caused
+        a real defect: on cache hit the caller returned the cached
+        body but with `issued_tokens=()`, breaking CP intel
+        correlation — the attacker saw the same canary string in the
+        response, but the canary store recorded zero issuances for
+        the retry. Now both fields round-trip together."""
         with self._lock:
-            self.file_cache[path] = body
+            self.file_cache[path] = (body, issued_tokens)
             self.file_cache.move_to_end(path)
             while len(self.file_cache) > self._max_cache:
                 self.file_cache.popitem(last=False)
 
-    def cached_file(self, path: str) -> str | None:
+    def cached_file(self, path: str) -> tuple[str, tuple[Any, ...]] | None:
+        """Return (body, issued_tokens) tuple or None on miss."""
         with self._lock:
-            body = self.file_cache.get(path)
-            if body is not None:
-                self.file_cache.move_to_end(path)
-            return body
+            entry = self.file_cache.get(path)
+            if entry is None:
+                return None
+            self.file_cache.move_to_end(path)
+            # Backward-compat: legacy entries stored bare strings.
+            # Normalize to (body, ()) on read so old caches don't
+            # crash callers; new writes always store tuples.
+            if isinstance(entry, str):
+                return (entry, ())
+            return entry
 
     def cache_sql(self, query_key: str, rows: list[dict[str, Any]]) -> None:
         with self._lock:
