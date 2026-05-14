@@ -32,6 +32,7 @@ work in addition to enforcing the model's own limit.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,20 +83,49 @@ class Stage2Classifier:
         # Confirm the model's label-id wiring matches what we expect.
         # protectai/deberta-v3-base-prompt-injection-v2 ships
         # {0: "SAFE", 1: "INJECTION"}; if a future model swap reverses
-        # the order, we'd silently invert the score. Hard-fail at load
-        # time so the operator notices.
+        # the order, we'd silently invert the score.
+        #
+        # The earlier substring match ("INJ" in label) is dangerous —
+        # a model labelled {0: "NOT_INJECTION", 1: "INJECTION"} (a
+        # common HF convention) would match index 0 first under dict
+        # insertion order and silently invert the score. Match on
+        # `INJECTION` exactly, anywhere in the label, but require it
+        # to be the full word (or a hyphen-separated component) so
+        # "NOT_INJECTION" / "NOT-INJECTION" / "PROMPT-INJECTION" all
+        # resolve correctly. Reject zero or multiple matches.
         id2label = {int(k): str(v).upper() for k, v in self._model.config.id2label.items()}
-        self._injection_index = next(
-            (i for i, label in id2label.items() if "INJ" in label),
-            None,
-        )
-        if self._injection_index is None:
+        matches = [
+            i
+            for i, label in id2label.items()
+            if "INJECTION" in re.split(r"[_\-\s]", label)
+        ]
+        if len(matches) == 0:
             raise ValueError(
                 f"stage-2 model at {self._model_dir} has unexpected "
-                f"label mapping: {id2label}. Expected one label to "
-                f"contain 'INJ' (e.g. 'INJECTION'). Wire a custom "
+                f"label mapping: {id2label}. Expected exactly one label "
+                f"to contain the token 'INJECTION' (e.g. 'INJECTION', "
+                f"'PROMPT-INJECTION', 'NOT_INJECTION'). Wire a custom "
                 f"index in stage2.py if your model differs."
             )
+        if len(matches) > 1:
+            raise ValueError(
+                f"stage-2 model at {self._model_dir} has ambiguous "
+                f"label mapping: {id2label}. Multiple labels match "
+                f"'INJECTION' ({[id2label[i] for i in matches]}); "
+                f"the previous substring-match would have silently "
+                f"picked the first."
+            )
+        # Disambiguate between e.g. {0: "NOT_INJECTION", 1: "INJECTION"}
+        # by preferring the label without a negation prefix.
+        positive = [
+            i
+            for i in matches
+            if not any(neg in id2label[i] for neg in ("NOT", "NON", "SAFE", "BENIGN"))
+        ]
+        if positive:
+            self._injection_index = positive[0]
+        else:
+            self._injection_index = matches[0]
         # ORT sessions are thread-safe per the docs, but the
         # tokenizer's batch_encode_plus is not. Guard tokenization
         # under a lock so we don't corrupt internal state under
@@ -139,6 +169,14 @@ class Stage2Classifier:
             text = text[:MAX_STAGE2_CHARS]
 
         t0 = time.monotonic()
+        # Hold the lock across BOTH tokenization and inference. HF fast
+        # tokenizers expose buffers (numpy arrays returned with
+        # return_tensors="np") whose backing memory is owned by the
+        # tokenizer's internal pools; releasing the lock before
+        # consuming those buffers in self._model(**inputs) lets a
+        # second thread re-enter the tokenizer and invalidate them
+        # under us. DeBERTa-v3 inference is ~50-200ms per call, so
+        # serializing is the correct behavior anyway.
         with self._tokenizer_lock:
             inputs = self._tokenizer(
                 text,
@@ -146,8 +184,24 @@ class Stage2Classifier:
                 truncation=True,
                 max_length=512,
             )
-        outputs = self._model(**inputs)
+            outputs = self._model(**inputs)
         logits = outputs.logits[0]
+        # Defensive NaN/inf guard. A corrupted ONNX model (FP16 overflow,
+        # truncated weights from a bad transfer) can produce non-finite
+        # logits. Without this guard, softmax → NaN → float(NaN) → NaN
+        # score, and the caller's `max(stage1, stage2_score)` and
+        # threshold comparisons all return False, falling through the
+        # label ladder and bucketing every input as "exploit_chain" —
+        # i.e. canary on every request, ON ALL TRAFFIC. Catch it
+        # explicitly and disable stage 2 for this call.
+        if not np.all(np.isfinite(logits)):
+            logger.warning(
+                "stage2: non-finite logits from model (likely corrupt "
+                "weights); returning score=0 and degrading to stage-1 "
+                "for this request",
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            return Stage2Verdict(score=0.0, elapsed_ms=elapsed_ms)
         # Numerically-stable softmax (the logits can be > 30 for
         # confident inputs; raw exp would overflow float32).
         shifted = logits - logits.max()
