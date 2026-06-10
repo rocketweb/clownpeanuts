@@ -8,6 +8,7 @@ import copy
 import csv
 import io
 import json
+import logging
 from datetime import datetime, timezone
 import re
 import threading
@@ -116,6 +117,20 @@ def create_app(orchestrator: Any) -> Any:
         rate_limit_exempt_paths = {"/health"}
     if auth_enabled and not operator_tokens and not viewer_tokens:
         raise RuntimeError("api auth is enabled but no operator/viewer tokens are configured")
+    if not auth_enabled:
+        # The TAXII2 / intel endpoints serve attacker TTPs and indicators.
+        # With auth disabled they are world-readable to anyone who can
+        # reach the port. Fine for a loopback dev run; dangerous if the
+        # service is bound to a routable interface. Make the condition
+        # impossible to miss in the logs.
+        logging.getLogger(__name__).warning(
+            "SECURITY: ClownPeanuts API auth is disabled "
+            "(api.auth_enabled=false). All endpoints, including the "
+            "TAXII2 threat-intel feed (/taxii2/..., /intel/...), are "
+            "served WITHOUT authentication. Do not expose this service "
+            "beyond localhost without setting auth_enabled plus "
+            "operator/viewer tokens."
+        )
     if cors_allow_credentials and "*" in cors_allow_origins:
         raise RuntimeError("api cors_allow_credentials cannot be true when cors_allow_origins includes '*'")
 

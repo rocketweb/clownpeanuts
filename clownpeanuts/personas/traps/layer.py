@@ -15,10 +15,18 @@ Spec: hueydeweylouie/docs/HUEYDEWEYLOUIE-SPEC.md §5.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Operators set CLOWNPEANUTS_REQUIRE_STAGE2 to fail closed when a pack
+# is supposed to ship the stage-2 ML model but it can't be loaded,
+# rather than silently serving stage-1-only detection. Off by default
+# for backward compatibility with stage-1-only packs.
+_REQUIRE_STAGE2_ENV = "CLOWNPEANUTS_REQUIRE_STAGE2"
+_TRUTHY = {"1", "true", "yes", "on"}
 
 from clownpeanuts.personas.traps.classifier import (
     ClassifierVerdict,
@@ -189,6 +197,14 @@ class TrapLayer:
         self.canaries = canary_library
         self.tools = tool_registry
 
+    @property
+    def stage2_loaded(self) -> bool:
+        """Whether two-layer (stage-1 + stage-2 ML) detection is active.
+
+        False means the trap layer is running stage-1 heuristics only.
+        """
+        return self.classifier.stage2_loaded
+
     @classmethod
     def from_pack(
         cls,
@@ -211,10 +227,14 @@ class TrapLayer:
         """
         token_factory = TokenFactory.from_pack(pack_dir, namespace=namespace)
         extra_rules = (classifier_overrides or {}).get("rules") or []
+        require_stage2 = (
+            os.getenv(_REQUIRE_STAGE2_ENV, "").strip().lower() in _TRUTHY
+        )
         return cls(
             classifier=HeuristicClassifier.from_pack(
                 pack_dir,
                 extra_rules=extra_rules,
+                require_stage2=require_stage2,
             ),
             token_factory=token_factory,
             canary_library=CanaryTemplateLibrary.from_pack(pack_dir),

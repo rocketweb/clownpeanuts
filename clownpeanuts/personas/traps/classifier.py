@@ -111,12 +111,23 @@ class HeuristicClassifier:
         self.threshold = threshold
         self.stage2 = stage2
 
+    @property
+    def stage2_loaded(self) -> bool:
+        """Whether the stage-2 ML classifier is active.
+
+        False means detection is running on stage-1 heuristics alone.
+        Surfaced so callers (and health endpoints) can tell when
+        two-layer detection has degraded to one layer.
+        """
+        return self.stage2 is not None
+
     @classmethod
     def from_pack(
         cls,
         pack_dir: Path,
         *,
         extra_rules: list[dict] | None = None,
+        require_stage2: bool = False,
     ) -> "HeuristicClassifier":
         """Build a classifier from the pack-shipped rules, optionally
         appending operator-supplied `extra_rules` (X-018).
@@ -164,7 +175,7 @@ class HeuristicClassifier:
         return cls(
             rules=rules,
             threshold=threshold,
-            stage2=Stage2Classifier.from_pack(pack_dir),
+            stage2=Stage2Classifier.from_pack(pack_dir, require=require_stage2),
         )
 
     # Hard cap on the input length passed to regex engines. Python's
