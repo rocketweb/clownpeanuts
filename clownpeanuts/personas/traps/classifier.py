@@ -38,6 +38,87 @@ class HeuristicRule:
     score: float
 
 
+def _is_unbounded_brace_quantifier(pattern: str, brace_index: int) -> tuple[bool, int]:
+    """Parse a ``{...}`` quantifier at ``brace_index``.
+
+    Returns ``(is_unbounded, next_index)``. ``{n,}`` is unbounded; ``{n}`` and
+    ``{n,m}`` are bounded. A non-quantifier ``{`` is treated as a literal.
+    """
+
+    close = pattern.find("}", brace_index)
+    if close < 0:
+        return (False, brace_index + 1)
+    body = pattern[brace_index + 1 : close]
+    if not body or not all(ch.isdigit() or ch == "," for ch in body):
+        return (False, brace_index + 1)  # literal '{', not a quantifier
+    unbounded = body.endswith(",")  # {n,} has no upper bound
+    return (unbounded, close + 1)
+
+
+def _has_catastrophic_nested_quantifier(pattern: str) -> bool:
+    """Conservative detector for the classic ReDoS shape.
+
+    Flags a group that is quantified with an unbounded quantifier (``+``, ``*``,
+    or ``{n,}``) whose body itself contains an unbounded quantifier, e.g.
+    ``(a+)+`` or ``(.*)*``. It does NOT flag safe forms such as ``(ab)+`` or
+    ``(a{2,5})+``. Heuristic by design (conservative: prefers false negatives
+    over rejecting legitimate patterns); the input is also length-capped at
+    classification time.
+    """
+
+    # Each open group tracks whether its direct body contains an unbounded
+    # quantifier.
+    group_stack: list[dict[str, bool]] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2  # escaped char: skip it
+            continue
+        if ch == "[":  # character class: skip to the unescaped ']'
+            i += 1
+            while i < n and pattern[i] != "]":
+                i += 2 if pattern[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "(":
+            group_stack.append({"unbounded_inner": False})
+            i += 1
+            continue
+        if ch == ")":
+            closed = group_stack.pop() if group_stack else {"unbounded_inner": False}
+            i += 1
+            # Inspect the quantifier (if any) applied to this group.
+            unbounded_here = False
+            if i < n and pattern[i] in "+*":
+                unbounded_here = True
+                i += 1
+            elif i < n and pattern[i] == "{":
+                unbounded_here, i = _is_unbounded_brace_quantifier(pattern, i)
+            elif i < n and pattern[i] == "?":
+                i += 1  # optional: bounded
+            if unbounded_here and closed["unbounded_inner"]:
+                return True
+            # An unbounded quantifier anywhere inside this group (or the group's
+            # own unbounded repetition) is also "inside" the enclosing group.
+            if group_stack and (closed["unbounded_inner"] or unbounded_here):
+                group_stack[-1]["unbounded_inner"] = True
+            continue
+        if ch in "+*":
+            if group_stack:
+                group_stack[-1]["unbounded_inner"] = True
+            i += 1
+            continue
+        if ch == "{":
+            unbounded, i = _is_unbounded_brace_quantifier(pattern, i)
+            if unbounded and group_stack:
+                group_stack[-1]["unbounded_inner"] = True
+            continue
+        i += 1
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class ClassifierVerdict:
     label: str  # benign | probing | jailbreak_attempt | exploit_chain
@@ -82,6 +163,13 @@ def _compile_rules(
             raise ValueError(
                 f"{source} classifier rule {name!r}: bad regex: {e}"
             ) from e
+        if _has_catastrophic_nested_quantifier(str(regex)):
+            raise ValueError(
+                f"{source} classifier rule {name!r}: regex has a nested unbounded "
+                f"quantifier (e.g. '(a+)+') that can cause catastrophic backtracking "
+                f"(ReDoS); rewrite it to avoid quantifying a group whose body is "
+                f"already unbounded"
+            )
         score = float(raw.get("score", 0.0))
         if not (0.0 < score <= 1.0):
             raise ValueError(

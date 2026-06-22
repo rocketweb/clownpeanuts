@@ -183,7 +183,17 @@ Trust-boundary reminder applied throughout: emulated-service behavior (running a
 
 ## Follow-up gaps (completeness critic)
 
-These were not fully covered by the subsystem reviewers and warrant a focused second pass. Several are likely real:
+These were surfaced by the completeness critic and were investigated and resolved in a second pass (2026-06-22):
+
+| Gap | Verdict | Action |
+| --- | --- | --- |
+| G1 ReDoS via classifier regexes | Lower than stated (regex is from Ed25519-signed/trust-verified packs or operator config, not attacker-controlled; input capped at 8 KiB; dirtylaundry shares profiles, not packs) | Added a conservative compile-time nested-quantifier lint in `personas/traps/classifier.py` as defense-in-depth |
+| G2 second CSV injection sink (export.py) | Real, same class as M4 | Fixed in this PR via the `SafeDictWriter` rollout |
+| G3 dashboard cookie minting | Real: the session route GET minted an operator-token cookie to any visitor | Made token minting POST-only in `dashboard/app/api/auth/session/route.ts`; the broader same-origin-proxy / always-secure-cookie redesign is recommended but left to the maintainer (architecture change) |
+| G4 docker-compose ops auth wiring | Real: the `api` service binds 0.0.0.0 without auth env, so the fail-closed guard blocks startup | Added `CP_API_AUTH_ENABLED=true` + `CP_API_OPERATOR_TOKEN` to the `api` service |
+| G5 DNS-rebind residual (SIEM/rotation) | Accepted residual: the endpoints are operator config, not attacker-controlled (the structurally identical hosted.py finding was rejected during verification). A true fix needs IP-pinning across all outbound paths (http+https with TLS SNI), a risky cross-cutting refactor | Documented; deferred to a maintainer decision |
+
+Original critic notes follow for reference.
 
 
 ### G1. ReDoS via persona-pack classifier regexes - clownpeanuts/personas/traps/classifier.py (_compile_rules line 80 `re.compile(regex)`; HeuristicClassifier.classify line 213 `rule.pattern.search(text)`), with pack-sourced rules compiled at classifier.py:148-150 (source="pack")
