@@ -79,6 +79,10 @@ class APIConfig:
     rate_limit_burst: int = 60
     rate_limit_exempt_paths: list[str] = field(default_factory=lambda: list(DEFAULT_API_RATE_LIMIT_EXEMPT_PATHS))
     max_request_body_bytes: int = 262144
+    # Direct-peer addresses whose X-Forwarded-For header is trusted for client
+    # identification (rate limiting). Empty by default: when the API is reached
+    # directly, the spoofable XFF header is ignored and the socket peer is used.
+    rate_limit_trusted_proxies: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -277,6 +281,9 @@ class DirtyLaundrySharingConfig:
     export_interval_hours: int = 24
     request_timeout_seconds: float = 5.0
     headers: dict[str, str] = field(default_factory=dict)
+    # Secure by default: profile-share fetches refuse private/loopback/link-local
+    # targets. Operators running a peer on an internal network can opt in.
+    allow_private_endpoint: bool = False
 
 
 @dataclass(slots=True)
@@ -639,6 +646,20 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         raise ValueError("api.rate_limit_exempt_paths cannot include wildcard patterns")
     if len(rate_limit_exempt_paths) > 16:
         raise ValueError("api.rate_limit_exempt_paths must include at most 16 entries")
+    rate_limit_trusted_proxies_raw = api_raw.get("rate_limit_trusted_proxies", [])
+    if rate_limit_trusted_proxies_raw is None:
+        rate_limit_trusted_proxies_raw = []
+    if not isinstance(rate_limit_trusted_proxies_raw, list):
+        raise ValueError("api.rate_limit_trusted_proxies must be a list")
+    rate_limit_trusted_proxies: list[str] = []
+    for proxy_item in rate_limit_trusted_proxies_raw:
+        proxy_value = str(proxy_item).strip()
+        if not proxy_value:
+            continue
+        if " " in proxy_value:
+            raise ValueError("api.rate_limit_trusted_proxies entries must not include spaces")
+        if proxy_value not in rate_limit_trusted_proxies:
+            rate_limit_trusted_proxies.append(proxy_value)
     api_config = APIConfig(
         docs_enabled=_parse_bool_value(
             api_raw.get("docs_enabled"),
@@ -670,6 +691,7 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         rate_limit_burst=rate_limit_burst,
         rate_limit_exempt_paths=rate_limit_exempt_paths,
         max_request_body_bytes=max_request_body_bytes,
+        rate_limit_trusted_proxies=rate_limit_trusted_proxies,
     )
 
     logging_raw = data.get("logging", {})
@@ -1224,6 +1246,11 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         export_interval_hours=export_interval_hours,
         request_timeout_seconds=request_timeout_seconds,
         headers=sharing_headers,
+        allow_private_endpoint=_parse_bool_value(
+            sharing_raw.get("allow_private_endpoint"),
+            field_name="agents.dirtylaundry.sharing.allow_private_endpoint",
+            default=False,
+        ),
     )
     dirtylaundry_config = DirtyLaundryConfig(
         enabled=_parse_bool_value(

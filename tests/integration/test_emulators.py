@@ -1334,7 +1334,9 @@ def test_redis_db_emulator_enforces_total_store_budget() -> None:
 def test_memcached_db_emulator_enforces_value_and_store_budgets() -> None:
     emulator = MemcachedDbEmulator()
     emulator._MAX_VALUE_BYTES = 8
-    emulator._MAX_TOTAL_STORE_BYTES = 16
+    # Budget accounts for key-name bytes plus value bytes. With keys "token"(5),
+    # "k1"(2), "k2"(2): token(5+6)=11, +k1(2+6)=19 fits 20, +k2(2+6)=27 exceeds.
+    emulator._MAX_TOTAL_STORE_BYTES = 20
     config = ServiceConfig(
         name="memcached-db",
         module="clownpeanuts.services.database.memcached_emulator",
@@ -2712,5 +2714,43 @@ def test_mongo_db_emulator_supports_list_collections_and_stats() -> None:
             assert isinstance(commands, dict)
             assert "serverStatus" in commands
             assert "listCollections" in commands
+    finally:
+        asyncio.run(emulator.stop())
+
+
+def test_http_emulator_drops_slowloris_stalled_request() -> None:
+    # A client that opens a connection and never finishes sending the request
+    # must be force-closed by the request-read watchdog, releasing its bounded
+    # connection slot, rather than parking a worker thread indefinitely.
+    emulator = HttpEmulator()
+    emulator.set_runtime(_runtime())
+    emulator._connection_idle_timeout_seconds = 0.5
+    emulator._request_read_deadline_seconds = 0.5
+    config = ServiceConfig(
+        name="http-admin",
+        module="clownpeanuts.services.http.emulator",
+        listen_host="127.0.0.1",
+        ports=[0],
+        config={},
+    )
+    asyncio.run(emulator.start(config))
+    try:
+        endpoint = emulator.bound_endpoint
+        assert endpoint is not None
+        host, port = endpoint
+
+        sock = socket.create_connection((host, port), timeout=5.0)
+        try:
+            # Send a partial request line and then stall (no headers, no blank line).
+            sock.sendall(b"GET / HTTP/1.0\r\n")
+            sock.settimeout(5.0)
+            # The watchdog (0.5s) should close the connection; recv then returns EOF.
+            start = time.time()
+            data = sock.recv(1024)
+            elapsed = time.time() - start
+            assert data == b"" or data == b""  # connection closed by server
+            assert elapsed < 4.0
+        finally:
+            sock.close()
     finally:
         asyncio.run(emulator.stop())

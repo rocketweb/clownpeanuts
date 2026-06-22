@@ -50,6 +50,10 @@ class Emulator(ServiceEmulator):
     _MAX_RESP_BULK_BYTES = 65_536
     _MAX_RECV_BYTES = 1_048_576
     _MAX_TOTAL_STORE_BYTES = 64 * 1024 * 1024
+    # Hard cap on the number of distinct keys. Bounds the per-entry dict/object
+    # overhead that the byte budget alone does not capture, and keeps capacity
+    # checks bounded.
+    _MAX_STORE_KEYS = 100_000
     _OOM_REPLY = b"-OOM command not allowed when used memory > 'maxmemory'.\r\n"
 
     def __init__(self) -> None:
@@ -1620,6 +1624,13 @@ class Emulator(ServiceEmulator):
     def _set_usage_bytes(cls, values: set[str]) -> int:
         return sum(cls._encoded_len(value) for value in values)
 
+    @staticmethod
+    def _key_name_bytes(key: str) -> int:
+        # Key names consume real memory and must count toward the budget;
+        # otherwise an attacker stores many huge key names with empty values and
+        # never trips the cap.
+        return len(key.encode("utf-8"))
+
     def _key_usage_bytes_locked(self, key: str) -> int:
         if key in self._store:
             return self._encoded_len(self._store[key])
@@ -1631,20 +1642,51 @@ class Emulator(ServiceEmulator):
             return self._set_usage_bytes(self._set_store[key])
         return 0
 
-    def _total_store_bytes_locked(self) -> int:
-        return (
-            sum(self._encoded_len(value) for value in self._store.values())
-            + sum(self._hash_usage_bytes(values) for values in self._hash_store.values())
-            + sum(self._list_usage_bytes(values) for values in self._list_store.values())
-            + sum(self._set_usage_bytes(values) for values in self._set_store.values())
+    def _key_total_usage_locked(self, key: str) -> int:
+        present = (
+            key in self._store
+            or key in self._hash_store
+            or key in self._list_store
+            or key in self._set_store
         )
+        if not present:
+            return 0
+        return self._key_name_bytes(key) + self._key_usage_bytes_locked(key)
+
+    def _store_key_count_locked(self) -> int:
+        # A Redis key lives in exactly one type store, so summing lengths counts
+        # distinct keys.
+        return len(self._store) + len(self._hash_store) + len(self._list_store) + len(self._set_store)
+
+    def _total_store_bytes_locked(self) -> int:
+        total = 0
+        for key, value in self._store.items():
+            total += self._key_name_bytes(key) + self._encoded_len(value)
+        for key, values in self._hash_store.items():
+            total += self._key_name_bytes(key) + self._hash_usage_bytes(values)
+        for key, values in self._list_store.items():
+            total += self._key_name_bytes(key) + self._list_usage_bytes(values)
+        for key, values in self._set_store.items():
+            total += self._key_name_bytes(key) + self._set_usage_bytes(values)
+        return total
 
     def _fits_key_updates_locked(self, updates: dict[str, int]) -> bool:
         if not updates:
             return True
+        new_keys = sum(
+            1
+            for key in updates
+            if key not in self._store
+            and key not in self._hash_store
+            and key not in self._list_store
+            and key not in self._set_store
+        )
+        if new_keys and self._store_key_count_locked() + new_keys > self._MAX_STORE_KEYS:
+            return False
         current_total = self._total_store_bytes_locked()
-        current_usage = sum(self._key_usage_bytes_locked(key) for key in updates)
-        projected_total = current_total - current_usage + sum(max(0, int(size)) for size in updates.values())
+        current_usage = sum(self._key_total_usage_locked(key) for key in updates)
+        projected_usage = sum(self._key_name_bytes(key) + max(0, int(size)) for key, size in updates.items())
+        projected_total = current_total - current_usage + projected_usage
         return projected_total <= self._MAX_TOTAL_STORE_BYTES
 
     def _set_key_string_locked(self, key: str, value: str, *, clear_expiration: bool = False) -> bool:

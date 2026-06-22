@@ -8,6 +8,8 @@ import io
 import json
 from typing import Any
 
+from clownpeanuts.core.csv_safe import SafeDictWriter
+
 
 def build_soc_handoff(
     report: dict[str, Any],
@@ -135,7 +137,7 @@ def build_soc_handoff(
         "session_engagement_score",
         "session_classification",
     ]
-    writer = csv.DictWriter(csv_output, fieldnames=fieldnames)
+    writer = SafeDictWriter(csv.DictWriter(csv_output, fieldnames=fieldnames))
     writer.writeheader()
     writer.writerow(
         {
@@ -173,7 +175,7 @@ def build_soc_handoff(
             }
         )
     tsv_output = io.StringIO()
-    tsv_writer = csv.DictWriter(tsv_output, fieldnames=fieldnames, delimiter="\t")
+    tsv_writer = SafeDictWriter(csv.DictWriter(tsv_output, fieldnames=fieldnames, delimiter="\t"))
     tsv_writer.writeheader()
     tsv_writer.writerow(
         {

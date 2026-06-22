@@ -8,6 +8,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -56,6 +57,10 @@ _CLIENT_SSL = 0x00000800
 class Emulator(ServiceEmulator):
     _MAX_PACKET_PAYLOAD_BYTES = 1_048_576
     _MAX_PREPARED_STATEMENTS = 1000
+    # Hard wall-clock cap on assembling a single packet. The per-recv idle
+    # timeout resets on every byte, so a 1-byte-at-a-time trickle could pin a
+    # connection slot indefinitely; this bounds the whole packet read.
+    _MAX_PACKET_READ_SECONDS = 30.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -1295,13 +1300,31 @@ class Emulator(ServiceEmulator):
             return None
         data = bytearray()
         try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_PACKET_READ_SECONDS
+        try:
             while len(data) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
                 chunk = conn.recv(size - len(data))
                 if not chunk:
                     return None
                 data.extend(chunk)
         except (TimeoutError, OSError):
             return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
         return bytes(data)
 
     @staticmethod

@@ -53,6 +53,10 @@ _SSL_REQUEST_CODE = 80877103
 
 class Emulator(ServiceEmulator):
     _MAX_MESSAGE_SIZE_BYTES = 8 * 1024 * 1024
+    # Maximum BSON document nesting depth accepted by the decoder. A crafted
+    # frame can encode far more levels than Python's recursion limit in only a
+    # few KB, so cap well below that limit.
+    _MAX_BSON_DEPTH = 64
 
     def __init__(self) -> None:
         super().__init__()
@@ -895,7 +899,10 @@ class Emulator(ServiceEmulator):
             section_type = payload[offset]
             offset += 1
             if section_type == 0:
-                doc, _ = self._decode_document(payload, offset)
+                try:
+                    doc, _ = self._decode_document(payload, offset)
+                except (RecursionError, ValueError, struct.error, IndexError):
+                    return None
                 return doc
             if section_type == 1:
                 if offset + 4 > len(payload):
@@ -919,7 +926,10 @@ class Emulator(ServiceEmulator):
         if offset + 8 > len(payload):
             return None
         offset += 8  # skip numberToSkip and numberToReturn
-        doc, _ = self._decode_document(payload, offset)
+        try:
+            doc, _ = self._decode_document(payload, offset)
+        except (RecursionError, ValueError, struct.error, IndexError):
+            return None
         return doc
 
     @staticmethod
@@ -971,22 +981,37 @@ class Emulator(ServiceEmulator):
             self._response_id += 1
             return self._response_id
 
-    def _decode_document(self, data: bytes, offset: int = 0) -> tuple[dict[str, Any], int]:
+    def _decode_document(self, data: bytes, offset: int = 0, depth: int = 0) -> tuple[dict[str, Any], int]:
         if offset + 4 > len(data):
             return ({}, len(data))
         length = int.from_bytes(data[offset : offset + 4], "little")
         end = offset + length
         if length < 5 or end > len(data):
             return ({}, len(data))
+        if depth >= self._MAX_BSON_DEPTH:
+            # Refuse to recurse past the nesting cap. A crafted frame can encode
+            # millions of nesting levels in a few KB; without this bound the
+            # recursion blows the Python stack and crashes the handler thread.
+            return ({}, end)
         pos = offset + 4
         result: dict[str, Any] = {}
         while pos < end - 1:
             element_type = data[pos]
             pos += 1
             key, pos = self._decode_cstring(data, pos)
-            value, pos = self._decode_value(data, pos, element_type)
+            value, pos = self._decode_value(data, pos, element_type, depth + 1)
             result[key] = value
         return (result, end)
+
+    @staticmethod
+    def _array_index_key(key: str) -> int:
+        # BSON array keys are the stringified indices "0", "1", ... A raw-frame
+        # attacker can send non-numeric keys; tolerate them instead of letting
+        # int() raise ValueError and crash the handler thread.
+        try:
+            return int(key)
+        except (TypeError, ValueError):
+            return 1 << 62
 
     @staticmethod
     def _decode_cstring(data: bytes, offset: int) -> tuple[str, int]:
@@ -996,7 +1021,7 @@ class Emulator(ServiceEmulator):
         value = data[offset:end].decode("utf-8", errors="replace")
         return (value, end + 1)
 
-    def _decode_value(self, data: bytes, offset: int, element_type: int) -> tuple[Any, int]:
+    def _decode_value(self, data: bytes, offset: int, element_type: int, depth: int = 0) -> tuple[Any, int]:
         if element_type == 0x01 and offset + 8 <= len(data):
             return (struct.unpack_from("<d", data, offset)[0], offset + 8)
         if element_type == 0x02 and offset + 4 <= len(data):
@@ -1005,10 +1030,10 @@ class Emulator(ServiceEmulator):
             end = start + max(0, length - 1)
             return (data[start:end].decode("utf-8", errors="replace"), start + length)
         if element_type == 0x03:
-            return self._decode_document(data, offset)
+            return self._decode_document(data, offset, depth)
         if element_type == 0x04:
-            doc, new_offset = self._decode_document(data, offset)
-            items = [value for _, value in sorted(doc.items(), key=lambda item: int(item[0])) if _]
+            doc, new_offset = self._decode_document(data, offset, depth)
+            items = [value for key, value in sorted(doc.items(), key=lambda item: self._array_index_key(item[0])) if key]
             return (items, new_offset)
         if element_type == 0x05 and offset + 5 <= len(data):
             length = int.from_bytes(data[offset : offset + 4], "little")

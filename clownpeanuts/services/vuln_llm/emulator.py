@@ -95,6 +95,10 @@ class Emulator(ServiceEmulator):
     _MAX_BODY_BYTES = 256 * 1024  # 256 KiB request cap
     _DEFAULT_MODEL_NAME = "vuln-llm-endpoint-v0.1.0"
     _SERVER_HEADER = "vuln-llm-endpoint/0.1.0"
+    # Safety ceiling on attacker-supplied generation params so a request cannot
+    # pin host CPU/GPU (an unbounded max_tokens) or blow up stop-list matching.
+    _MAX_OUTPUT_TOKENS = 4096
+    _MAX_STOP_SEQUENCES = 8
 
     def __init__(self) -> None:
         super().__init__()
@@ -821,19 +825,48 @@ class Emulator(ServiceEmulator):
         }
 
     def _merge_gen_params(self, request: dict[str, Any]) -> GenerationParams:
-        """Build GenerationParams: manifest defaults, with per-request overrides."""
+        """Build GenerationParams: manifest defaults, with per-request overrides.
+
+        Every attacker-supplied override is range-clamped. bool is excluded from
+        the numeric checks (bool is an int subclass), max_tokens is bounded so a
+        single request cannot pin the host, and the stop list is restricted to
+        strings and capped in length.
+        """
         defaults = self._gen_defaults
         temp = request.get("temperature")
         top_p = request.get("top_p")
         max_t = request.get("max_tokens")
         stop = request.get("stop")
         seed = request.get("seed")
+
+        def _is_number(value: Any) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        temperature = float(temp) if _is_number(temp) else defaults.temperature
+        temperature = min(max(temperature, 0.0), 2.0)
+
+        top_p_value = float(top_p) if _is_number(top_p) else defaults.top_p
+        top_p_value = min(max(top_p_value, 0.0), 1.0)
+
+        token_ceiling = max(self._MAX_OUTPUT_TOKENS, int(defaults.max_tokens))
+        if isinstance(max_t, int) and not isinstance(max_t, bool):
+            max_tokens = max(1, min(int(max_t), token_ceiling))
+        else:
+            max_tokens = defaults.max_tokens
+
+        if isinstance(stop, list):
+            stop_sequences = tuple(item for item in stop if isinstance(item, str))[: self._MAX_STOP_SEQUENCES]
+        else:
+            stop_sequences = defaults.stop
+
+        seed_value = int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None
+
         return GenerationParams(
-            temperature=float(temp) if isinstance(temp, (int, float)) else defaults.temperature,
-            top_p=float(top_p) if isinstance(top_p, (int, float)) else defaults.top_p,
-            max_tokens=int(max_t) if isinstance(max_t, int) else defaults.max_tokens,
-            stop=tuple(stop) if isinstance(stop, list) else defaults.stop,
-            seed=int(seed) if isinstance(seed, int) else None,
+            temperature=temperature,
+            top_p=top_p_value,
+            max_tokens=max_tokens,
+            stop=stop_sequences,
+            seed=seed_value,
         )
 
     # ------- Helpers -------

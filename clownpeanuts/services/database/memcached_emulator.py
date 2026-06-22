@@ -46,6 +46,9 @@ class _ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 class Emulator(ServiceEmulator):
     _MAX_VALUE_BYTES = 65_536
     _MAX_TOTAL_STORE_BYTES = 64 * 1024 * 1024
+    # Hard cap on the number of distinct keys. Bounds per-entry overhead the
+    # byte budget does not capture (e.g. many tiny/empty values).
+    _MAX_STORE_KEYS = 100_000
     _MAX_KEYS_PER_GET = 64
     _MAX_COMMAND_LINE_BYTES = 4_096
 
@@ -522,12 +525,21 @@ class Emulator(ServiceEmulator):
         )
 
     def _current_store_bytes_locked(self) -> int:
+        # Value bytes only: feeds the emulated `STAT bytes` counter.
         return sum(len(value) for value in self._store.values())
 
+    def _current_store_usage_locked(self) -> int:
+        # Capacity accounting: include key-name bytes so an attacker cannot grow
+        # memory without bound via many/large key names with empty values.
+        return sum(len(key.encode("utf-8")) + len(value) for key, value in self._store.items())
+
     def _can_store_value_locked(self, key: str, value: bytes) -> bool:
-        current_total = self._current_store_bytes_locked()
-        current_key_bytes = len(self._store.get(key, b""))
-        projected_total = current_total - current_key_bytes + len(value)
+        if key not in self._store and len(self._store) + 1 > self._MAX_STORE_KEYS:
+            return False
+        key_bytes = len(key.encode("utf-8"))
+        current_total = self._current_store_usage_locked()
+        current_key_usage = (key_bytes + len(self._store[key])) if key in self._store else 0
+        projected_total = current_total - current_key_usage + key_bytes + len(value)
         return projected_total <= self._MAX_TOTAL_STORE_BYTES
 
     def _next_cas_token(self) -> int:

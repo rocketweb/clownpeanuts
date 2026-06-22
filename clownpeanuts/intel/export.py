@@ -10,6 +10,8 @@ import json
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from clownpeanuts.core.csv_safe import SafeDictWriter
+
 
 def build_stix_bundle(report: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -337,7 +339,9 @@ def render_theater_action_export(payload: dict[str, Any], *, output_format: str)
             "metadata_json",
         ]
         output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter, lineterminator="\n")
+        writer = SafeDictWriter(
+            csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter, lineterminator="\n")
+        )
         writer.writeheader()
         for item in actions:
             if not isinstance(item, dict):

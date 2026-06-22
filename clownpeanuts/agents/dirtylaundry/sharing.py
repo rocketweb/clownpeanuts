@@ -5,13 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 from typing import Any
-from urllib import request
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from ...core.safe_fetch import DEFAULT_MAX_RESPONSE_BYTES, SafeFetchError, safe_fetch
 from .profiles import AdversaryProfile, ProfileStore
 
 _NATIVE_SCHEMA = "clownpeanuts.dirtylaundry.profile_share.v1"
 _STIX_CUSTOM_TYPE = "x-clownpeanuts-adversary-profile"
+_MAX_SHARE_RESPONSE_BYTES = DEFAULT_MAX_RESPONSE_BYTES
 
 
 def _stix_timestamp(value: str | None = None) -> str:
@@ -181,14 +182,15 @@ def import_profiles(payload: dict[str, Any], *, store: ProfileStore) -> dict[str
     return {"status": "rejected", "reason": "unsupported share payload format", "imported": 0}
 
 
-def _read_json_response(response: Any) -> dict[str, Any]:
-    raw = response.read()
+def _decode_share_response(raw: bytes) -> dict[str, Any]:
     if not raw:
         return {"status": "ok"}
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("share endpoint returned invalid JSON payload") from exc
+    except RecursionError as exc:
+        raise RuntimeError("share endpoint response was nested too deeply") from exc
     if not isinstance(decoded, dict):
         raise RuntimeError("share endpoint response must be a JSON object")
     return decoded
@@ -200,22 +202,25 @@ def push_share_payload(
     payload: dict[str, Any],
     headers: dict[str, str] | None = None,
     timeout_seconds: float = 5.0,
+    allow_private: bool = False,
 ) -> dict[str, Any]:
     normalized_endpoint = endpoint.strip()
     if not normalized_endpoint:
         raise RuntimeError("share endpoint is required")
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    req = request.Request(
-        normalized_endpoint,
-        data=body,
-        headers={"Content-Type": "application/json", **(headers or {})},
-        method="POST",
-    )
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
-            return _read_json_response(response)
-    except Exception as exc:
-        raise RuntimeError(f"share push failed: {exc}") from exc
+        raw = safe_fetch(
+            normalized_endpoint,
+            data=body,
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST",
+            timeout=timeout_seconds,
+            max_bytes=_MAX_SHARE_RESPONSE_BYTES,
+            allow_private=allow_private,
+        )
+    except SafeFetchError as exc:
+        raise RuntimeError(f"share push rejected: {exc}") from exc
+    return _decode_share_response(raw)
 
 
 def pull_share_payload(
@@ -223,17 +228,20 @@ def pull_share_payload(
     endpoint: str,
     headers: dict[str, str] | None = None,
     timeout_seconds: float = 5.0,
+    allow_private: bool = False,
 ) -> dict[str, Any]:
     normalized_endpoint = endpoint.strip()
     if not normalized_endpoint:
         raise RuntimeError("share endpoint is required")
-    req = request.Request(
-        normalized_endpoint,
-        headers={"Accept": "application/json", **(headers or {})},
-        method="GET",
-    )
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
-            return _read_json_response(response)
-    except Exception as exc:
-        raise RuntimeError(f"share pull failed: {exc}") from exc
+        raw = safe_fetch(
+            normalized_endpoint,
+            headers={"Accept": "application/json", **(headers or {})},
+            method="GET",
+            timeout=timeout_seconds,
+            max_bytes=_MAX_SHARE_RESPONSE_BYTES,
+            allow_private=allow_private,
+        )
+    except SafeFetchError as exc:
+        raise RuntimeError(f"share pull rejected: {exc}") from exc
+    return _decode_share_response(raw)
