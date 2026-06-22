@@ -6,6 +6,7 @@ import html
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 import threading
 import time
 from typing import Any
@@ -68,6 +69,14 @@ class Emulator(ServiceEmulator):
         self._bound_port: int | None = None
         self._server_name = "Apache/2.4.54 (Ubuntu)"
         self._max_concurrent_connections = 256
+        # Per-recv idle timeout: a connection that goes silent for this long is
+        # dropped, defeating idle slowloris. Independent of response-side tarpit
+        # delays, which are writes and not affected by a read timeout.
+        self._connection_idle_timeout_seconds = 10.0
+        # Hard wall-clock cap on the request-read phase (request line, headers,
+        # and POST body). Cancelled before the response/tarpit phase so the
+        # intentional slow-drip and infinite-exfil streams are never cut short.
+        self._request_read_deadline_seconds = 30.0
         self._tarpit_enabled = True
         self._backup_stream_chunks = 40
         self._backup_chunk_size_bytes = 512
@@ -469,6 +478,57 @@ class Emulator(ServiceEmulator):
         class AdminHandler(BaseHTTPRequestHandler):
             server_version = "nginx/1.18.0"
             sys_version = ""
+            # Per-recv idle timeout applied to the connection socket by
+            # StreamRequestHandler.setup via BaseHTTPRequestHandler.
+            timeout = emulator._connection_idle_timeout_seconds
+
+            def setup(self) -> None:
+                super().setup()
+                self._read_deadline_timer: threading.Timer | None = None
+                deadline = emulator._request_read_deadline_seconds
+                if deadline and deadline > 0:
+                    timer = threading.Timer(float(deadline), self._abort_slow_request)
+                    timer.daemon = True
+                    self._read_deadline_timer = timer
+                    timer.start()
+
+            def _abort_slow_request(self) -> None:
+                # Fires only if the request is still being read past the
+                # deadline (a slowloris-style stall). Closing the socket
+                # unblocks the pending read and tears the connection down,
+                # releasing the bounded connection slot.
+                conn = getattr(self, "connection", None)
+                if conn is None:
+                    return
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+            def cancel_read_deadline(self) -> None:
+                timer = getattr(self, "_read_deadline_timer", None)
+                if timer is not None:
+                    timer.cancel()
+                    self._read_deadline_timer = None
+
+            def handle_one_request(self) -> None:
+                # Swallow the OSError raised when the watchdog force-closes the
+                # socket mid-read so it does not surface as a stderr traceback.
+                try:
+                    super().handle_one_request()
+                except (OSError, ConnectionError):
+                    self.close_connection = True
+
+            def finish(self) -> None:
+                self.cancel_read_deadline()
+                try:
+                    super().finish()
+                except OSError:
+                    pass
 
             def do_GET(self) -> None:  # noqa: N802
                 emulator._handle_http(self, "GET")
@@ -480,6 +540,18 @@ class Emulator(ServiceEmulator):
                 return
 
         return AdminHandler
+
+    @staticmethod
+    def _mark_request_read(handler: BaseHTTPRequestHandler) -> None:
+        """Cancel the request-read watchdog once the full request is consumed.
+
+        After this point the handler is in the response/tarpit phase, which is
+        operator-driven and must not be subject to the slowloris deadline.
+        """
+
+        cancel = getattr(handler, "cancel_read_deadline", None)
+        if cancel is not None:
+            cancel()
 
     def _handle_http(self, handler: BaseHTTPRequestHandler, method: str) -> None:
         parsed = urlsplit(handler.path)
@@ -501,6 +573,13 @@ class Emulator(ServiceEmulator):
             route=route,
             method=method,
         )
+
+        # For GET the request body (if any) is already fully consumed by the
+        # framework, so the slowloris read deadline can be released before the
+        # (possibly tarpitting) response begins. POST cancels after its body
+        # read below.
+        if method != "POST":
+            self._mark_request_read(handler)
 
         if method == "GET":
             if route == "/backup.sql.gz" and self._tarpit_enabled:
@@ -575,7 +654,15 @@ class Emulator(ServiceEmulator):
             return
 
         content_length = self._bounded_content_length(handler.headers.get("Content-Length"), self._MAX_POST_BODY_BYTES)
-        raw_body = handler.rfile.read(content_length).decode("utf-8", errors="replace")
+        try:
+            raw_body = handler.rfile.read(content_length).decode("utf-8", errors="replace")
+        except (OSError, ConnectionError):
+            # Connection dropped or force-closed by the read watchdog mid-body.
+            self._mark_request_read(handler)
+            return
+        # Attacker upload is fully consumed; release the slowloris deadline
+        # before generating the (possibly tarpitting) response.
+        self._mark_request_read(handler)
         form = {key: values[0] for key, values in parse_qs(raw_body).items()}
         status, body, credentials = self._route_post(
             route,

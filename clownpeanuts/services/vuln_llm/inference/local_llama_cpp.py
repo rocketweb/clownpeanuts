@@ -69,6 +69,7 @@ class LocalLlamaCppBackend(Backend):
             kwargs["lora_path"] = str(lora_path)
 
         self._llm = Llama(**kwargs)
+        self._n_ctx = int(n_ctx)
         self._model_path = model_path
         self._lora_path = lora_path
 
@@ -79,6 +80,7 @@ class LocalLlamaCppBackend(Backend):
     # worker threads under modest request volume.
     _MAX_CONTENT_CHARS = 8 * 1024  # per-message
     _MAX_MESSAGES = 16             # keep last N messages
+    _MAX_STOP_SEQUENCES = 8        # cap stop-list length passed to llama_cpp
 
     def _truncate_messages(
         self, messages: list[dict[str, Any]]
@@ -115,15 +117,20 @@ class LocalLlamaCppBackend(Backend):
         # tokenization (seconds of CPU) per request — easy DoS.
         messages = self._truncate_messages(messages)
 
+        # Defense in depth: even though the emulator clamps max_tokens, bound
+        # the output here too so a direct backend caller cannot request an
+        # arbitrarily long generation that pins the single in-process model.
+        effective_max_tokens = max(1, min(int(params.max_tokens), self._n_ctx))
+
         kwargs: dict[str, Any] = {
             "messages": messages,
             "temperature": params.temperature,
             "top_p": params.top_p,
-            "max_tokens": params.max_tokens,
+            "max_tokens": effective_max_tokens,
             "stream": False,
         }
         if params.stop:
-            kwargs["stop"] = list(params.stop)
+            kwargs["stop"] = list(params.stop)[: self._MAX_STOP_SEQUENCES]
         if params.seed is not None:
             kwargs["seed"] = params.seed
 

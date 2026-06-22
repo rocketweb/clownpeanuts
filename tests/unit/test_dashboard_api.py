@@ -990,6 +990,7 @@ def test_dashboard_api_ecosystem_dirtylaundry_routes(monkeypatch: pytest.MonkeyP
         payload: dict[str, Any],
         headers: dict[str, str] | None = None,
         timeout_seconds: float = 5.0,
+        allow_private: bool = False,
     ) -> dict[str, Any]:
         assert endpoint == "https://sharing.example"
         assert isinstance(payload, dict)
@@ -1002,6 +1003,7 @@ def test_dashboard_api_ecosystem_dirtylaundry_routes(monkeypatch: pytest.MonkeyP
         endpoint: str,
         headers: dict[str, str] | None = None,
         timeout_seconds: float = 5.0,
+        allow_private: bool = False,
     ) -> dict[str, Any]:
         assert endpoint == "https://sharing.example"
         assert headers == {"Authorization": "Bearer dashboard-token"}
@@ -2971,6 +2973,56 @@ def test_dashboard_api_rate_limit_restricts_non_exempt_paths() -> None:
 
     health_response = client.get("/health")
     assert health_response.status_code == 200
+
+
+def test_dashboard_api_rate_limit_ignores_spoofed_xff_by_default() -> None:
+    _ = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+
+    config = parse_config(
+        {
+            "api": {
+                "rate_limit_enabled": True,
+                "rate_limit_requests_per_minute": 1,
+                "rate_limit_burst": 0,
+            },
+            "services": [],
+        }
+    )
+    client = testclient.TestClient(create_app(Orchestrator(config)))
+
+    first = client.get("/status", headers={"x-forwarded-for": "1.1.1.1"})
+    assert first.status_code == 200
+    # A rotated X-Forwarded-For must NOT mint a fresh bucket: the untrusted
+    # header is ignored and both requests key on the same socket peer.
+    second = client.get("/status", headers={"x-forwarded-for": "2.2.2.2"})
+    assert second.status_code == 429
+
+
+def test_dashboard_api_rate_limit_honors_xff_from_trusted_proxy() -> None:
+    _ = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+
+    config = parse_config(
+        {
+            "api": {
+                "rate_limit_enabled": True,
+                "rate_limit_requests_per_minute": 1,
+                "rate_limit_burst": 0,
+                # The TestClient peer host is "testclient"; trusting it lets the
+                # forwarded client address drive per-client rate limiting.
+                "rate_limit_trusted_proxies": ["testclient"],
+            },
+            "services": [],
+        }
+    )
+    client = testclient.TestClient(create_app(Orchestrator(config)))
+
+    first = client.get("/status", headers={"x-forwarded-for": "1.1.1.1"})
+    assert first.status_code == 200
+    # Distinct forwarded clients via a trusted proxy get distinct buckets.
+    second = client.get("/status", headers={"x-forwarded-for": "2.2.2.2"})
+    assert second.status_code == 200
 
 
 def test_dashboard_api_rejects_oversized_mutation_payload() -> None:

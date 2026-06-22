@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 import socket
 import socketserver
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 from collections import OrderedDict
@@ -60,6 +61,10 @@ class Emulator(ServiceEmulator):
         self._banner = "SSH-2.0-OpenSSH_8.4p1 Debian-5"
         self._hostname = "ip-172-31-44-9"
         self._socket_timeout = 45.0
+        # Hard wall-clock cap on reading a single line. The per-recv idle
+        # timeout resets on every byte, so a 1-byte-at-a-time trickle could pin
+        # a connection slot for hours; this bounds the whole line read.
+        self._max_line_read_seconds = 30.0
         self._max_concurrent_connections = 256
         self._tarpit = AdaptiveThrottle(service_name=self.name)
         self._shell_state: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -409,7 +414,20 @@ class Emulator(ServiceEmulator):
     def _recvline(self, conn: socket.socket, limit: int = 2048) -> str | None:
         data = bytearray()
         try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + self._max_line_read_seconds
+        try:
             while len(data) < limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
                 chunk = conn.recv(1)
                 if not chunk:
                     break
@@ -423,6 +441,11 @@ class Emulator(ServiceEmulator):
                 data.extend(chunk)
         except (TimeoutError, OSError):
             return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
 
         if not data:
             return None

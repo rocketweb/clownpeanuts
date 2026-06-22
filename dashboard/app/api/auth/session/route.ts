@@ -7,7 +7,10 @@ const _resolveDashboardApiToken = (): string => {
   return token
 }
 
-const _sessionResponse = (): NextResponse => {
+// Mint the operator-token cookie. Only invoked on POST so a plain navigation
+// (GET, <img>, link) cannot cause the operator token to be deposited in an
+// arbitrary visitor's browser on the dashboard origin.
+const _mintSessionResponse = (): NextResponse => {
   const token = _resolveDashboardApiToken()
   const response = NextResponse.json({ ok: true, configured: token.length > 0 })
   if (!token) {
@@ -26,10 +29,12 @@ const _sessionResponse = (): NextResponse => {
   return response
 }
 
+// GET is a safe status probe only: it never sets the token cookie.
 export async function GET(): Promise<NextResponse> {
-  return _sessionResponse()
+  const token = _resolveDashboardApiToken()
+  return NextResponse.json({ ok: true, configured: token.length > 0 })
 }
 
 export async function POST(): Promise<NextResponse> {
-  return _sessionResponse()
+  return _mintSessionResponse()
 }

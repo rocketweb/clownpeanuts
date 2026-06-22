@@ -49,6 +49,19 @@ logger = logging.getLogger(__name__)
 MAX_STAGE2_CHARS = 1024
 
 
+class Stage2Unavailable(RuntimeError):
+    """Raised when stage-2 was required but could not be loaded.
+
+    Loading stage-2 is normally best-effort: a pack without the ONNX
+    model degrades cleanly to stage-1-only detection. Operators who
+    need a guarantee that two-layer detection is actually running set
+    `CLOWNPEANUTS_REQUIRE_STAGE2=1` (threaded through to
+    `from_pack(..., require=True)`), which turns every degrade path
+    below into this hard failure at pack-load time instead of a silent
+    fallback discovered later in production.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Stage2Verdict:
     """Single-input verdict from the stage-2 ML classifier."""
@@ -133,28 +146,57 @@ class Stage2Classifier:
         self._tokenizer_lock = threading.Lock()
 
     @classmethod
-    def from_pack(cls, pack_dir: Path) -> "Stage2Classifier | None":
+    def from_pack(
+        cls, pack_dir: Path, *, require: bool = False
+    ) -> "Stage2Classifier | None":
         """Load stage-2 from a pack's `traps/stage2/` directory.
 
         Returns None if the directory is absent — stage-2 is
         optional; packs built before X-017 landed run with stage-1
         alone.
+
+        When `require` is True, every path that would otherwise degrade
+        to stage-1-only raises `Stage2Unavailable` instead. Operators
+        set this (via `CLOWNPEANUTS_REQUIRE_STAGE2`) when running with a
+        pack that is supposed to ship the ML model and they want a hard
+        failure at startup rather than silently serving rules-only
+        detection. The degrade paths still log at WARNING when
+        `require` is False so the condition is visible in logs.
         """
         stage2_dir = Path(pack_dir) / "traps" / "stage2"
         if not stage2_dir.is_dir():
+            if require:
+                raise Stage2Unavailable(
+                    f"stage-2 required (CLOWNPEANUTS_REQUIRE_STAGE2) but "
+                    f"{stage2_dir} is absent: this pack ships stage-1 only"
+                )
             return None
         if not (stage2_dir / "model.onnx").is_file():
+            msg = (
+                f"stage2: {stage2_dir} exists but model.onnx is missing"
+            )
+            if require:
+                raise Stage2Unavailable(
+                    msg + " (CLOWNPEANUTS_REQUIRE_STAGE2 set)"
+                )
             logger.warning(
-                "stage2: %s exists but model.onnx is missing — "
-                "disabling stage 2", stage2_dir
+                "DEGRADED: %s — running stage-1 detection only. Set "
+                "CLOWNPEANUTS_REQUIRE_STAGE2=1 to fail closed instead.",
+                msg,
             )
             return None
         try:
             return cls(stage2_dir)
         except Exception as e:  # noqa: BLE001 — graceful degrade
+            if require:
+                raise Stage2Unavailable(
+                    f"stage-2 required (CLOWNPEANUTS_REQUIRE_STAGE2) but "
+                    f"load from {stage2_dir} failed: {e}"
+                ) from e
             logger.exception(
-                "stage2: load failed from %s — disabling stage 2 "
-                "(stage-1 heuristics still active): %s",
+                "DEGRADED: stage2 load failed from %s — running stage-1 "
+                "detection only (set CLOWNPEANUTS_REQUIRE_STAGE2=1 to fail "
+                "closed instead): %s",
                 stage2_dir, e,
             )
             return None

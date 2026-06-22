@@ -460,11 +460,13 @@ def test_dirtylaundry_runtime_share_push_pull(monkeypatch: pytest.MonkeyPatch) -
         payload: dict[str, Any],
         headers: dict[str, str] | None = None,
         timeout_seconds: float = 5.0,
+        allow_private: bool = False,
     ) -> dict[str, Any]:
         assert endpoint == "https://sharing.example"
         assert isinstance(payload, dict)
         assert headers == {"Authorization": "Bearer test-token"}
         assert timeout_seconds == 7.0
+        assert allow_private is False
         return {"status": "accepted"}
 
     def _fake_pull(
@@ -472,10 +474,12 @@ def test_dirtylaundry_runtime_share_push_pull(monkeypatch: pytest.MonkeyPatch) -
         endpoint: str,
         headers: dict[str, str] | None = None,
         timeout_seconds: float = 5.0,
+        allow_private: bool = False,
     ) -> dict[str, Any]:
         assert endpoint == "https://sharing.example"
         assert headers == {"Authorization": "Bearer test-token"}
         assert timeout_seconds == 7.0
+        assert allow_private is False
         return {
             "schema": "clownpeanuts.dirtylaundry.profile_share.v1",
             "profiles": [

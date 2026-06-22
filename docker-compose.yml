@@ -51,6 +51,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CP_REDIS_PASSWORD=${CP_REDIS_PASSWORD:?Must set CP_REDIS_PASSWORD}
+      # The API binds 0.0.0.0; auth MUST be enabled or the CLI guard refuses to
+      # start. Mirror the core service so the ops profile comes up with auth on.
+      - CP_API_AUTH_ENABLED=true
+      - CP_API_OPERATOR_TOKEN=${CP_API_OPERATOR_TOKEN:?Must set CP_API_OPERATOR_TOKEN}
     ports:
       - "8099:8099"
     healthcheck:

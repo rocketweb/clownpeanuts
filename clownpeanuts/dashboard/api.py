@@ -6,8 +6,11 @@ import asyncio
 import base64
 import copy
 import csv
+import hashlib
+import hmac
 import io
 import json
+import logging
 from datetime import datetime, timezone
 import re
 import threading
@@ -32,6 +35,7 @@ except Exception:  # pragma: no cover - optional dependency
     JSONResponse = Any  # type: ignore[assignment]
     TrustedHostMiddleware = None  # type: ignore[assignment]
 
+from clownpeanuts.core.csv_safe import SafeDictWriter
 from clownpeanuts.intel.export import (
     build_attack_navigator_layer,
     build_theater_action_export,
@@ -101,10 +105,23 @@ def create_app(orchestrator: Any) -> Any:
         str(token).strip() for token in getattr(api_config, "auth_operator_tokens", []) if str(token).strip()
     }
     viewer_tokens = {str(token).strip() for token in getattr(api_config, "auth_viewer_tokens", []) if str(token).strip()}
+    # Precompute fixed-length digests so token verification can run in constant
+    # time (no per-byte early exit that would leak a prefix-match length).
+    operator_token_digests = tuple(
+        hashlib.sha256(token.encode("utf-8")).digest() for token in operator_tokens
+    )
+    viewer_token_digests = tuple(
+        hashlib.sha256(token.encode("utf-8")).digest() for token in viewer_tokens
+    )
     allow_unauthenticated_health = bool(getattr(api_config, "allow_unauthenticated_health", True))
     rate_limit_enabled = bool(getattr(api_config, "rate_limit_enabled", False))
     rate_limit_requests_per_minute = max(1, int(getattr(api_config, "rate_limit_requests_per_minute", 240)))
     rate_limit_burst = max(0, int(getattr(api_config, "rate_limit_burst", 60)))
+    rate_limit_trusted_proxies = {
+        str(proxy).strip()
+        for proxy in (getattr(api_config, "rate_limit_trusted_proxies", []) or [])
+        if str(proxy).strip()
+    }
     max_request_body_bytes = max(1024, int(getattr(api_config, "max_request_body_bytes", 262144)))
     rate_limit_exempt_paths_raw = getattr(api_config, "rate_limit_exempt_paths", DEFAULT_API_RATE_LIMIT_EXEMPT_PATHS)
     rate_limit_exempt_paths = {
@@ -116,6 +133,20 @@ def create_app(orchestrator: Any) -> Any:
         rate_limit_exempt_paths = {"/health"}
     if auth_enabled and not operator_tokens and not viewer_tokens:
         raise RuntimeError("api auth is enabled but no operator/viewer tokens are configured")
+    if not auth_enabled:
+        # The TAXII2 / intel endpoints serve attacker TTPs and indicators.
+        # With auth disabled they are world-readable to anyone who can
+        # reach the port. Fine for a loopback dev run; dangerous if the
+        # service is bound to a routable interface. Make the condition
+        # impossible to miss in the logs.
+        logging.getLogger(__name__).warning(
+            "SECURITY: ClownPeanuts API auth is disabled "
+            "(api.auth_enabled=false). All endpoints, including the "
+            "TAXII2 threat-intel feed (/taxii2/..., /intel/...), are "
+            "served WITHOUT authentication. Do not expose this service "
+            "beyond localhost without setting auth_enabled plus "
+            "operator/viewer tokens."
+        )
     if cors_allow_credentials and "*" in cors_allow_origins:
         raise RuntimeError("api cors_allow_credentials cannot be true when cors_allow_origins includes '*'")
 
@@ -332,11 +363,17 @@ def create_app(orchestrator: Any) -> Any:
         return True
 
     def _client_identity_from_headers(*, x_forwarded_for: str | None, fallback: str) -> str:
-        if x_forwarded_for:
-            first = x_forwarded_for.split(",")[0].strip()
-            if first:
-                return first
         normalized_fallback = fallback.strip()
+        # Only honor X-Forwarded-For when the direct peer is a configured trusted
+        # proxy. Otherwise the header is attacker-controlled and rotating it would
+        # mint a fresh rate-limit bucket per request and churn the tracking map.
+        if x_forwarded_for and normalized_fallback and normalized_fallback in rate_limit_trusted_proxies:
+            # Walk right-to-left and take the nearest hop that is not itself a
+            # trusted proxy: that is the closest untrusted client.
+            for hop in reversed(x_forwarded_for.split(",")):
+                candidate = hop.strip()
+                if candidate and candidate not in rate_limit_trusted_proxies:
+                    return candidate
         return normalized_fallback or "unknown"
 
     def _request_client_identity(request: Request) -> str:
@@ -647,12 +684,22 @@ def create_app(orchestrator: Any) -> Any:
         token = parts[1].strip()
         return token or None
 
+    def _token_matches(token: str, digests: tuple[bytes, ...]) -> bool:
+        candidate = hashlib.sha256(token.encode("utf-8")).digest()
+        matched = False
+        for digest in digests:
+            # hmac.compare_digest is constant-time; evaluate every stored token
+            # with no early break so latency does not depend on the input bytes.
+            if hmac.compare_digest(candidate, digest):
+                matched = True
+        return matched
+
     def _resolve_role_for_token(token: str | None) -> str | None:
-        if token is None:
+        if not token:
             return None
-        if token in operator_tokens:
+        if operator_token_digests and _token_matches(token, operator_token_digests):
             return "operator"
-        if token in viewer_tokens:
+        if viewer_token_digests and _token_matches(token, viewer_token_digests):
             return "viewer"
         return None
 
@@ -945,7 +992,9 @@ def create_app(orchestrator: Any) -> Any:
                 "metadata_json",
             ]
             stream = io.StringIO()
-            writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="," if normalized == "csv" else "\t")
+            writer = SafeDictWriter(
+                csv.DictWriter(stream, fieldnames=fieldnames, delimiter="," if normalized == "csv" else "\t")
+            )
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
@@ -990,7 +1039,9 @@ def create_app(orchestrator: Any) -> Any:
                 "metadata_json",
             ]
             stream = io.StringIO()
-            writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="," if normalized == "csv" else "\t")
+            writer = SafeDictWriter(
+                csv.DictWriter(stream, fieldnames=fieldnames, delimiter="," if normalized == "csv" else "\t")
+            )
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)

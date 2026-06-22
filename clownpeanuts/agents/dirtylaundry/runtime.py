@@ -468,6 +468,7 @@ class DirtyLaundryManager:
                 payload=payload,
                 headers=headers,
                 timeout_seconds=timeout_seconds,
+                allow_private=self._config.sharing.allow_private_endpoint,
             )
         except RuntimeError as exc:
             raise DirtyLaundryError(str(exc)) from exc
@@ -495,6 +496,7 @@ class DirtyLaundryManager:
                 endpoint=target_endpoint,
                 headers=headers,
                 timeout_seconds=timeout_seconds,
+                allow_private=self._config.sharing.allow_private_endpoint,
             )
         except RuntimeError as exc:
             raise DirtyLaundryError(str(exc)) from exc
