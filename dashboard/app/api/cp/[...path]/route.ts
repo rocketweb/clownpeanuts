@@ -10,11 +10,34 @@ export const dynamic = "force-dynamic"
 
 type RouteContext = { params: Promise<{ path: string[] }> }
 
+const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"])
+
+const mutationHasSameOrigin = (request: NextRequest): boolean => {
+  const origin = request.headers.get("origin")
+  if (!origin) return false
+  const forwardedProtocol = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim()
+  const protocol = forwardedProtocol || request.nextUrl.protocol.replace(/:$/, "")
+  if (!new Set(["http", "https"]).has(protocol)) return false
+  const host = (request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? request.nextUrl.host)
+    .split(",")[0]
+    .trim()
+  try {
+    return new URL(origin).origin === new URL(`${protocol}://${host}`).origin
+  } catch {
+    return false
+  }
+}
+
 const proxy = async (request: NextRequest, context: RouteContext): Promise<NextResponse> => {
   const config = readDashboardAuthConfig()
   const session = request.cookies.get(DASHBOARD_SESSION_COOKIE_NAME)?.value
   if (!config.configured || !verifyDashboardSession(session, config.username, config.sessionSecret)) {
     return NextResponse.json({ detail: "authentication required" }, { status: 401 })
+  }
+
+  const method = request.method.toUpperCase()
+  if (MUTATION_METHODS.has(method) && !mutationHasSameOrigin(request)) {
+    return NextResponse.json({ detail: "cross-origin mutation refused" }, { status: 403 })
   }
 
   const internalBase = (process.env.CLOWNPEANUTS_API_INTERNAL_URL ?? "http://127.0.0.1:8099").trim()
@@ -39,18 +62,19 @@ const proxy = async (request: NextRequest, context: RouteContext): Promise<NextR
   }
   headers.set("authorization", `Bearer ${config.apiToken}`)
 
-  const method = request.method.toUpperCase()
-  const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer()
+  const body = method === "GET" || method === "HEAD" ? undefined : request.body
+  const upstreamRequest: RequestInit & { duplex?: "half" } = {
+    method,
+    headers,
+    body,
+    cache: "no-store",
+    redirect: "manual",
+    signal: AbortSignal.timeout(30_000),
+  }
+  if (body) upstreamRequest.duplex = "half"
   let upstream: Response
   try {
-    upstream = await fetch(target, {
-      method,
-      headers,
-      body,
-      cache: "no-store",
-      redirect: "manual",
-      signal: AbortSignal.timeout(30_000),
-    })
+    upstream = await fetch(target, upstreamRequest)
   } catch {
     return NextResponse.json({ detail: "upstream API unavailable" }, { status: 502 })
   }

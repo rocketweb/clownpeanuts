@@ -6,6 +6,7 @@ import base64
 import socket
 import socketserver
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -43,6 +44,23 @@ class _ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             self._connection_slots.release()
 
 
+class _DeadlineReader:
+    def __init__(self, conn: socket.socket) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> _DeadlineReader:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def readline(self, limit: int) -> bytes | None:
+        return Emulator._recvline(self._conn, limit)
+
+    def read(self, size: int) -> bytes | None:
+        return Emulator._recv_exact(self._conn, size)
+
+
 class Emulator(ServiceEmulator):
     _MAX_VALUE_BYTES = 65_536
     _MAX_TOTAL_STORE_BYTES = 64 * 1024 * 1024
@@ -51,6 +69,7 @@ class Emulator(ServiceEmulator):
     _MAX_STORE_KEYS = 100_000
     _MAX_KEYS_PER_GET = 64
     _MAX_COMMAND_LINE_BYTES = 4_096
+    _MAX_READ_SECONDS = 30.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -248,7 +267,7 @@ class Emulator(ServiceEmulator):
                 outcome="success",
             )
 
-        with conn.makefile("rb") as reader:
+        with _DeadlineReader(conn) as reader:
             while True:
                 raw = reader.readline(self._MAX_COMMAND_LINE_BYTES + 2)
                 if not raw:
@@ -589,6 +608,74 @@ class Emulator(ServiceEmulator):
             conn.sendall(payload)
         except OSError:
             return
+
+    @staticmethod
+    def _recv_exact(conn: socket.socket, size: int) -> bytes | None:
+        if size < 0 or size > Emulator._MAX_VALUE_BYTES:
+            return None
+        data = bytearray()
+        try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_READ_SECONDS
+        try:
+            while len(data) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
+                chunk = conn.recv(size - len(data))
+                if not chunk:
+                    return None
+                data.extend(chunk)
+        except (TimeoutError, OSError):
+            return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
+        return bytes(data)
+
+    @staticmethod
+    def _recvline(conn: socket.socket, limit: int) -> bytes | None:
+        if limit <= 0:
+            return None
+        data = bytearray()
+        try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_READ_SECONDS
+        try:
+            while len(data) < limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
+                byte = conn.recv(1)
+                if not byte:
+                    return bytes(data)
+                data.extend(byte)
+                if byte == b"\n":
+                    return bytes(data)
+        except (TimeoutError, OSError):
+            return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
+        return bytes(data)
 
     def _record_command(
         self,

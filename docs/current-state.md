@@ -46,7 +46,7 @@ Notable behavior currently implemented:
 - HTTP admin realism includes paginated internal operator-like APIs for user inventory and login-audit review (`/api/internal/users`, `/api/internal/login-audit`).
 - Database emulators expose realistic-but-fake protocol interactions and tarpit delay controls.
 - Redis emulator command realism now includes multi-key/stateful utility, hash, list, and set workflows (`MSET`, `MGET`, `SCAN`, `INCR`, `EXPIRE`, `PERSIST`, `TTL`, `PTTL`, `TYPE`, `HSET`, `HGET`, `HGETALL`, `HKEYS`, `HLEN`, `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LPOS`, `RPOPLPUSH`, `LMOVE`, `LINSERT`, `LSET`, `LTRIM`, `LREM`, `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SRANDMEMBER`, `SPOP`, `SMOVE`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`) with type-aware key handling.
-- Protocol parser guards enforce maximum attacker-controlled payload sizes across HTTP/Redis/MongoDB/MySQL/PostgreSQL request reads and Memcached command-line parsing.
+- Protocol parser guards enforce maximum attacker-controlled payload sizes across HTTP/Redis/MongoDB/MySQL/PostgreSQL request reads and Memcached command-line parsing. MySQL, PostgreSQL, Redis, MongoDB, and Memcached socket reads also enforce monotonic wall-clock deadlines so trickle traffic cannot hold a read indefinitely.
 - MySQL/PostgreSQL prepared statement workflows enforce per-connection inventory caps (`1000`) with protocol-level rejection once caps are exceeded.
 - SQL emulators now cover common enumeration paths (`information_schema`, `pg_catalog`, schema/table/column discovery, and `COUNT(*)` probes) with coherent fake datasets.
 - MySQL emulator realism now includes index-enumeration/runtime metadata workflows (`SHOW INDEX`/`SHOW KEYS`, `SHOW CREATE TABLE`, `SHOW GRANTS`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW BINARY LOGS`, `SHOW REPLICA STATUS`/`SHOW SLAVE STATUS`, and `information_schema.statistics`) with table-aware synthetic schema/index metadata.
@@ -208,8 +208,9 @@ FastAPI (`clownpeanuts/dashboard/api.py`):
 - Intel report cache behavior is tunable via `api.intel_report_cache_ttl_seconds` (set to `0` to disable cache reuse).
 - API hardening controls via config (`api.docs_enabled`, `api.cors_allow_origins`, `api.trusted_hosts`, `api.auth_enabled`, operator/viewer tokens, `api.rate_limit_*`, `api.max_request_body_bytes`).
 - Bundled runtime profiles now require explicit Redis credentials via `CP_REDIS_PASSWORD` interpolation (including `clownpeanuts/config/defaults.yml`) for Redis-backed session/event-bus URLs.
-- Dashboard login requires a configured username/password pair and creates a signed HttpOnly dashboard session. Browser HTTP traffic uses an authenticated same-origin proxy that keeps the operator API token server-side; WebSockets use 60-second HMAC tickets validated by the API.
-- API middleware enforces request-size caps on mutation methods using `api.max_request_body_bytes` and returns HTTP `413` for oversized request bodies, including fallback size checks when `Content-Length` is missing or malformed.
+- Docker Compose publishes infrastructure Redis on host loopback only; application containers continue to reach it over the private Compose network.
+- Dashboard login requires a configured username/password pair and creates a signed HttpOnly dashboard session. Browser HTTP traffic uses an authenticated proxy that requires an exact matching origin for mutations, streams request bodies without buffering them in the dashboard process, and keeps the operator API token server-side; WebSockets use 60-second HMAC tickets validated by the API.
+- API middleware admits requests through rate limiting and authentication before reading mutation bodies, rejects cookie-only mutation authentication, and enforces `api.max_request_body_bytes` while streaming with HTTP `413` responses once the cap is crossed.
 - API startup now defensively rejects wildcard CORS with credentials (`api.cors_allow_credentials=true` with `api.cors_allow_origins` containing `*`) even when app config is constructed programmatically outside parser validation.
 - `doctor` diagnostics include explicit Redis backend auth checks for both `session` and `event_bus` when configured in Redis mode, plus production API hardening posture checks including required API auth + non-empty operator tokens, minimum token-length enforcement (`>=24`) for operator/viewer tokens, rejection of placeholder API tokens (`replace-with-*`/`change-me` style values), required role-separated operator/viewer token sets, required authenticated health posture (`api.allow_unauthenticated_health=false`), required API rate limiting, bounded request-body limits, restrictive rate-limit exemption paths, bounded rate-limit burst posture (`rate_limit_burst <= rate_limit_requests_per_minute`), and bounded sustained production rate caps (`rate_limit_requests_per_minute <= 5000`).
 - Ecosystem config now includes optional pre-seeded credential registry input (`ecosystem.witchbait_credentials`) and JIT lifecycle controls (`ecosystem.jit.enabled`, `ecosystem.jit.pool_size`, `ecosystem.jit.ttl_idle_seconds`, `ecosystem.jit.ttl_max_seconds`).
@@ -264,7 +265,7 @@ Executed on **July 22, 2026**:
 
 1. Python tests
    - Command: `.venv/bin/pytest`
-   - Result: `637 passed, 1 skipped`
+   - Result: `646 passed, 1 skipped`
 
 2. Dashboard production build
    - Command: `cd dashboard && npm run build`

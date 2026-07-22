@@ -49,6 +49,7 @@ class Emulator(ServiceEmulator):
     _MAX_RESP_ARRAY_ITEMS = 256
     _MAX_RESP_BULK_BYTES = 65_536
     _MAX_RECV_BYTES = 1_048_576
+    _MAX_READ_SECONDS = 30.0
     _MAX_TOTAL_STORE_BYTES = 64 * 1024 * 1024
     # Hard cap on the number of distinct keys. Bounds the per-entry dict/object
     # overhead that the byte budget alone does not capture, and keeps capacity
@@ -1528,20 +1529,51 @@ class Emulator(ServiceEmulator):
             return None
         data = bytearray()
         try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_READ_SECONDS
+        try:
             while len(data) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
                 chunk = conn.recv(count - len(data))
                 if not chunk:
                     return None
                 data.extend(chunk)
         except (TimeoutError, OSError):
             return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
         return bytes(data)
 
     @staticmethod
     def _recvline(conn: socket.socket, limit: int = 4096) -> bytes | None:
         data = bytearray()
         try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_READ_SECONDS
+        try:
             while len(data) < limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
                 byte = conn.recv(1)
                 if not byte:
                     return None
@@ -1550,6 +1582,11 @@ class Emulator(ServiceEmulator):
                     return bytes(data[:-2])
         except (TimeoutError, OSError):
             return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
         return None
 
     @staticmethod

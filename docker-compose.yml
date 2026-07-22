@@ -29,7 +29,7 @@ services:
     container_name: clownpeanuts-redis
     command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     environment:
       - REDIS_PASSWORD=${CP_REDIS_PASSWORD:?Must set CP_REDIS_PASSWORD}
     healthcheck:

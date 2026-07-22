@@ -1,5 +1,8 @@
 import socket
 import struct
+import threading
+
+import pytest
 
 from clownpeanuts.services.database.memcached_emulator import Emulator as MemcachedEmulator
 from clownpeanuts.services.database.mongo_emulator import Emulator as MongoEmulator
@@ -157,6 +160,74 @@ def test_mysql_recv_exact_aborts_slow_trickle() -> None:
         MySQLEmulator._MAX_PACKET_READ_SECONDS = 30.0
         reader.close()
         writer.close()
+
+
+def _assert_slow_read_hits_wall_clock_deadline(
+    read_operation: object,
+    initial_payload: bytes,
+) -> None:
+    reader, writer = socket.socketpair()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            read_operation(reader)  # type: ignore[operator]
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    try:
+        reader.settimeout(5.0)
+        writer.sendall(initial_payload)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        completed_before_peer_close = finished.wait(0.5)
+    finally:
+        writer.close()
+        finished.wait(1.0)
+        reader.close()
+
+    assert completed_before_peer_close is True
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("emulator_type", "read_operation"),
+    [
+        (PostgresEmulator, lambda conn: PostgresEmulator._recv_exact(conn, 4)),
+        (RedisEmulator, lambda conn: RedisEmulator._recv_exact(conn, 4)),
+        (RedisEmulator, lambda conn: RedisEmulator._recvline(conn)),
+        (MongoEmulator, lambda conn: MongoEmulator._recv_exact(conn, 4)),
+    ],
+)
+def test_database_read_helpers_abort_slow_trickle(
+    monkeypatch: pytest.MonkeyPatch,
+    emulator_type: type,
+    read_operation: object,
+) -> None:
+    monkeypatch.setattr(emulator_type, "_MAX_READ_SECONDS", 0.1, raising=False)
+    _assert_slow_read_hits_wall_clock_deadline(read_operation, b"x")
+
+
+@pytest.mark.parametrize(
+    "initial_payload",
+    [
+        b"v",
+        b"set key 0 0 4\r\nx",
+    ],
+)
+def test_memcached_reads_abort_slow_trickle(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_payload: bytes,
+) -> None:
+    monkeypatch.setattr(MemcachedEmulator, "_MAX_READ_SECONDS", 0.1, raising=False)
+    emulator = MemcachedEmulator()
+    _assert_slow_read_hits_wall_clock_deadline(
+        lambda conn: emulator._handle_client(conn, ("203.0.113.10", 11211)),
+        initial_payload,
+    )
 
 
 def test_ssh_recvline_aborts_slow_trickle() -> None:

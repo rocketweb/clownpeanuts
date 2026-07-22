@@ -1,4 +1,5 @@
 import base64
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -3083,6 +3084,94 @@ def test_dashboard_api_rejects_oversized_mutation_payload() -> None:
     )
     assert malformed_length_response.status_code == 413
 
+    small_unknown_length_response = client.post(
+        "/alerts/test",
+        content='{"summary":"ok"}',
+        headers={"content-type": "application/json", "content-length": "invalid"},
+    )
+    assert small_unknown_length_response.status_code == 200
+
+
+def test_dashboard_api_rejects_unauthenticated_mutation_before_reading_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+    requests = pytest.importorskip("starlette.requests")
+
+    config = parse_config(
+        {
+            "api": {
+                "auth_enabled": True,
+                "auth_operator_tokens": [OPERATOR_TOKEN],
+                "max_request_body_bytes": 1024,
+            },
+            "services": [],
+        }
+    )
+    app = create_app(Orchestrator(config))
+    client = testclient.TestClient(app)
+    original_body = requests.Request.body
+    body_reads = 0
+
+    async def tracking_body(request: object) -> bytes:
+        nonlocal body_reads
+        body_reads += 1
+        return await original_body(request)
+
+    monkeypatch.setattr(requests.Request, "body", tracking_body)
+    response = client.post(
+        "/alerts/test",
+        content=b'{}',
+        headers={"content-type": "application/json", "content-length": "invalid"},
+    )
+
+    assert response.status_code == 401
+    assert body_reads == 0
+
+
+def test_dashboard_api_stops_streaming_once_mutation_body_exceeds_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+    requests = pytest.importorskip("starlette.requests")
+
+    config = parse_config(
+        {
+            "api": {
+                "auth_enabled": True,
+                "auth_operator_tokens": [OPERATOR_TOKEN],
+                "max_request_body_bytes": 1024,
+            },
+            "services": [],
+        }
+    )
+    app = create_app(Orchestrator(config))
+    client = testclient.TestClient(app)
+    chunks_read = 0
+
+    async def oversized_stream(_request: object):
+        nonlocal chunks_read
+        for _ in range(100):
+            chunks_read += 1
+            yield b"x" * 512
+        yield b""
+
+    monkeypatch.setattr(requests.Request, "stream", oversized_stream)
+    response = client.post(
+        "/alerts/test",
+        content=b"x",
+        headers={
+            "authorization": f"Bearer {OPERATOR_TOKEN}",
+            "content-type": "application/json",
+            "content-length": "invalid",
+        },
+    )
+
+    assert response.status_code == 413
+    assert chunks_read == 3
+
 
 def test_dashboard_api_auth_requires_token_when_enabled() -> None:
     _ = pytest.importorskip("fastapi")
@@ -3137,6 +3226,33 @@ def test_dashboard_api_auth_accepts_cookie_token_when_enabled() -> None:
     client.cookies.set("cp_api_token", VIEWER_TOKEN)
     response = client.get("/status")
     assert response.status_code == 200
+
+
+def test_dashboard_api_auth_rejects_cookie_token_for_mutations() -> None:
+    _ = pytest.importorskip("fastapi")
+    testclient = pytest.importorskip("fastapi.testclient")
+
+    config = parse_config(
+        {
+            "api": {
+                "auth_enabled": True,
+                "auth_operator_tokens": [OPERATOR_TOKEN],
+            },
+            "services": [],
+        }
+    )
+    client = testclient.TestClient(create_app(Orchestrator(config)))
+
+    client.cookies.set("cp_api_token", OPERATOR_TOKEN)
+    cookie_response = client.post("/alerts/test", json={"summary": "cookie mutation"})
+    bearer_response = client.post(
+        "/alerts/test",
+        json={"summary": "bearer mutation"},
+        headers={"authorization": f"Bearer {OPERATOR_TOKEN}"},
+    )
+
+    assert cookie_response.status_code == 401
+    assert bearer_response.status_code == 200
 
 
 def test_dashboard_api_auth_can_require_health_authentication() -> None:

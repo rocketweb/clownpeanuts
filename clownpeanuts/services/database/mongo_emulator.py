@@ -8,6 +8,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -53,6 +54,7 @@ _SSL_REQUEST_CODE = 80877103
 
 class Emulator(ServiceEmulator):
     _MAX_MESSAGE_SIZE_BYTES = 8 * 1024 * 1024
+    _MAX_READ_SECONDS = 30.0
     # Maximum BSON document nesting depth accepted by the decoder. A crafted
     # frame can encode far more levels than Python's recursion limit in only a
     # few KB, so cap well below that limit.
@@ -967,13 +969,31 @@ class Emulator(ServiceEmulator):
             return None
         data = bytearray()
         try:
+            prior_timeout = conn.gettimeout()
+        except OSError:
+            prior_timeout = None
+        deadline = time.monotonic() + Emulator._MAX_READ_SECONDS
+        try:
             while len(data) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                budget = remaining if prior_timeout is None else min(remaining, prior_timeout)
+                try:
+                    conn.settimeout(budget)
+                except OSError:
+                    return None
                 chunk = conn.recv(size - len(data))
                 if not chunk:
                     return None
                 data.extend(chunk)
         except (TimeoutError, OSError):
             return None
+        finally:
+            try:
+                conn.settimeout(prior_timeout)
+            except OSError:
+                pass
         return bytes(data)
 
     def _next_response_id(self) -> int:

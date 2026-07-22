@@ -24,7 +24,7 @@ pip install -e .[dev,api]
 .venv/bin/pytest
 ```
 
-Expected current result: `637 passed, 1 skipped`.
+Expected current result: `646 passed, 1 skipped`.
 
 ### 2. Build dashboard once
 

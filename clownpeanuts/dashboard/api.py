@@ -762,7 +762,7 @@ def create_app(orchestrator: Any) -> Any:
             return None
         return "operator" if hmac.compare_digest(expected, supplied) else None
 
-    def _http_auth_role(request: Request) -> str | None:
+    def _http_auth_role(request: Request, *, allow_cookie: bool = True) -> str | None:
         role = _resolve_role_for_token(_parse_bearer_token(request.headers.get("authorization")))
         if role is not None:
             return role
@@ -771,11 +771,12 @@ def create_app(orchestrator: Any) -> Any:
             role = _resolve_role_for_token(api_key.strip())
             if role is not None:
                 return role
-        cookie_token = request.cookies.get(API_TOKEN_COOKIE_NAME)
-        if cookie_token:
-            role = _resolve_role_for_token(cookie_token.strip())
-            if role is not None:
-                return role
+        if allow_cookie:
+            cookie_token = request.cookies.get(API_TOKEN_COOKIE_NAME)
+            if cookie_token:
+                role = _resolve_role_for_token(cookie_token.strip())
+                if role is not None:
+                    return role
         return None
 
     def _websocket_auth_role(websocket: WebSocket) -> str | None:
@@ -860,10 +861,17 @@ def create_app(orchestrator: Any) -> Any:
                 content_length = -1
             if content_length > max_request_body_bytes:
                 return True
-            if content_length >= 0:
-                return False
-        body = await request.body()
-        return len(body) > max_request_body_bytes
+
+        body = bytearray()
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            remaining = max_request_body_bytes - len(body)
+            if len(chunk) > remaining:
+                return True
+            body.extend(chunk)
+        request._body = bytes(body)
+        return False
 
     def _normalize_campaign_id(raw_campaign_id: str) -> str:
         normalized = str(raw_campaign_id).strip()
@@ -1143,8 +1151,6 @@ def create_app(orchestrator: Any) -> Any:
     @app.middleware("http")
     async def api_auth_middleware(request: Request, call_next: Any) -> Response:
         method = request.method.upper()
-        if await _request_body_too_large(request):
-            return _http_request_too_large_response()
         apply_rate_limit = (
             rate_limit_enabled
             and method != "OPTIONS"
@@ -1159,22 +1165,26 @@ def create_app(orchestrator: Any) -> Any:
                 return response
             setattr(request.state, "rate_limit_remaining", remaining)
 
-        if not auth_enabled:
-            response = await call_next(request)
-        elif method == "OPTIONS":
-            response = await call_next(request)
-        elif allow_unauthenticated_health and _is_health_path(request.url.path):
-            response = await call_next(request)
-        else:
-            role = _http_auth_role(request)
+        response: Response | None = None
+        requires_auth = (
+            auth_enabled
+            and method != "OPTIONS"
+            and not (allow_unauthenticated_health and _is_health_path(request.url.path))
+        )
+        if requires_auth:
+            role = _http_auth_role(request, allow_cookie=method not in mutation_methods)
             if role is None:
                 response = _http_auth_required_response()
             else:
                 setattr(request.state, "api_auth_role", role)
                 if method in mutation_methods and role != "operator":
                     response = _http_operator_required_response()
-                else:
-                    response = await call_next(request)
+
+        if response is None:
+            if await _request_body_too_large(request):
+                response = _http_request_too_large_response()
+            else:
+                response = await call_next(request)
 
         if apply_rate_limit:
             remaining = max(0, int(getattr(request.state, "rate_limit_remaining", 0)))
