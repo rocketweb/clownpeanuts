@@ -7,6 +7,8 @@ import ipaddress
 from pathlib import Path
 from typing import Any
 
+from clownpeanuts.core.redis_url import validate_redis_url
+
 
 DEFAULT_API_CORS_ALLOW_ORIGINS = [
     "http://127.0.0.1:3000",
@@ -73,6 +75,7 @@ class APIConfig:
     auth_enabled: bool = False
     auth_operator_tokens: list[str] = field(default_factory=list)
     auth_viewer_tokens: list[str] = field(default_factory=list)
+    auth_websocket_ticket_secret: str = ""
     allow_unauthenticated_health: bool = True
     rate_limit_enabled: bool = False
     rate_limit_requests_per_minute: int = 240
@@ -565,7 +568,10 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         raise ValueError("session max_events_per_session must be greater than zero")
     session_config = SessionConfig(
         backend=session_backend,
-        redis_url=str(session_raw.get("redis_url", "redis://redis:6379/0")),
+        redis_url=validate_redis_url(
+            str(session_raw.get("redis_url", "redis://redis:6379/0")),
+            field_name="session redis_url",
+        ) if session_backend == "redis" else str(session_raw.get("redis_url", "redis://redis:6379/0")),
         key_prefix=str(session_raw.get("key_prefix", "clownpeanuts")),
         ttl_seconds=session_ttl,
         connect_timeout_seconds=session_connect_timeout,
@@ -584,7 +590,10 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         raise ValueError("event_bus connect_timeout_seconds must be greater than zero")
     event_bus_config = EventBusConfig(
         backend=event_bus_backend,
-        redis_url=str(event_bus_raw.get("redis_url", "redis://redis:6379/1")),
+        redis_url=validate_redis_url(
+            str(event_bus_raw.get("redis_url", "redis://redis:6379/1")),
+            field_name="event_bus redis_url",
+        ) if event_bus_backend == "redis" else str(event_bus_raw.get("redis_url", "redis://redis:6379/1")),
         channel_prefix=str(event_bus_raw.get("channel_prefix", "clownpeanuts")),
         connect_timeout_seconds=event_bus_connect_timeout,
         required=bool(event_bus_raw.get("required", False)),
@@ -606,6 +615,9 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         api_raw.get("auth_viewer_tokens"),
         field_name="api.auth_viewer_tokens",
     )
+    auth_websocket_ticket_secret = str(api_raw.get("auth_websocket_ticket_secret", "")).strip()
+    if auth_websocket_ticket_secret and len(auth_websocket_ticket_secret) < 32:
+        raise ValueError("api auth_websocket_ticket_secret must be at least 32 characters")
     for token in [*auth_operator_tokens, *auth_viewer_tokens]:
         if len(token) < 16:
             raise ValueError("api auth tokens must be at least 16 characters")
@@ -677,6 +689,7 @@ def parse_config(data: dict[str, Any]) -> AppConfig:
         auth_enabled=auth_enabled,
         auth_operator_tokens=auth_operator_tokens,
         auth_viewer_tokens=auth_viewer_tokens,
+        auth_websocket_ticket_secret=auth_websocket_ticket_secret,
         allow_unauthenticated_health=_parse_bool_value(
             api_raw.get("allow_unauthenticated_health"),
             field_name="api.allow_unauthenticated_health",

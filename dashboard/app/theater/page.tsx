@@ -268,14 +268,15 @@ export default function TheaterPage() {
       if (closed) {
         return
       }
-      void ensureDashboardAuthSession().finally(() => {
+      void ensureDashboardAuthSession().then(async () => {
         if (closed) {
           return
         }
+        const websocketAuth = await apiWebSocketProtocols()
         const wsUrl = withApiTokenQuery(
-          `${WS_THEATER_BASE}?limit=120&events_per_session=250&interval_ms=${THEATER_STREAM_INTERVAL_MS}`
+          `${websocketAuth.websocketBase}${WS_THEATER_BASE}?limit=120&events_per_session=250&interval_ms=${THEATER_STREAM_INTERVAL_MS}`
         )
-        const protocols = apiWebSocketProtocols()
+        const protocols = websocketAuth.protocols
         ws = protocols.length > 0 ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl)
         ws.onopen = () => {
           setConnected(true)
@@ -306,7 +307,7 @@ export default function TheaterPage() {
             return
           }
         }
-      })
+      }).catch(() => undefined)
     }
 
     connect()

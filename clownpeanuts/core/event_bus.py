@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlunparse
 
 from clownpeanuts.config.schema import EventBusConfig
 from clownpeanuts.core.logging import get_logger
+from clownpeanuts.core.redis_url import validate_redis_url
 
 
 EventHandler = Callable[[dict[str, Any]], None]
@@ -148,6 +149,7 @@ class EventBus:
         try:
             import redis  # type: ignore[import-not-found]
 
+            validate_redis_url(self.config.redis_url)
             safe_redis_url = self._redact_redis_url(self.config.redis_url)
             client = redis.Redis.from_url(
                 self.config.redis_url,

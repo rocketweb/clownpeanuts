@@ -201,11 +201,18 @@ If you want the full operator experience with the web dashboard:
 pip install -e .[api]
 
 # Start the API server (add --start-services to also run emulators in-process)
+CP_API_AUTH_ENABLED=true \
+CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 clownpeanuts api --config ./config/clownpeanuts.yml --host 127.0.0.1 --port 8099
 
 # In another terminal, start the dashboard
 cd dashboard
 npm install
+CLOWNPEANUTS_API_TOKEN="replace-with-long-random-token" \
+CLOWNPEANUTS_DASHBOARD_USERNAME="operator" \
+CLOWNPEANUTS_DASHBOARD_PASSWORD="replace-with-a-strong-password" \
+CLOWNPEANUTS_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 npm run dev
 ```
 
@@ -222,18 +229,26 @@ Primary routes:
 The simplest way to run the full stack:
 
 ```bash
-# Full stack: API (with emulators) + dashboard + Redis
+# Full stack: API (with emulators) + credential-gated dashboard + Redis
+CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
+CP_REDIS_PASSWORD="replace-with-strong-redis-password" \
+CP_DASHBOARD_USERNAME="operator" \
+CP_DASHBOARD_PASSWORD="replace-with-a-strong-password" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 docker compose --profile ops up --build
 
 # Core runtime only: emulators + Redis (no dashboard)
 docker compose --profile core up --build
 ```
 
-Set custom auth secrets for API and Redis before startup:
+The `ops` profile requires API, Redis, and dashboard credentials. The dashboard signs its own session cookie and keeps the API token server-side.
 
 ```bash
 CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
 CP_REDIS_PASSWORD="replace-with-strong-redis-password" \
+CP_DASHBOARD_USERNAME="operator" \
+CP_DASHBOARD_PASSWORD="replace-with-a-strong-password" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 docker compose --profile ops up --build
 ```
 

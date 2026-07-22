@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 import copy
 import csv
 import hashlib
@@ -88,6 +89,46 @@ CAMPAIGN_EXPORT_SCHEMA = "clownpeanuts.campaign_graph.v1"
 WS_BASE_PROTOCOL = "cp-events-v1"
 WS_AUTH_PROTOCOL_PREFIX = "cp-auth."
 API_TOKEN_COOKIE_NAME = "cp_api_token"
+MAX_SUMMARY_CACHE_ENTRIES = 256
+MAX_WEBSOCKET_TICKET_FUTURE_SECONDS = 300
+
+
+class _BoundedTTLCache:
+    """Small thread-safe TTL/LRU cache with eager stale-entry pruning."""
+
+    def __init__(self, *, max_entries: int) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._lock = threading.RLock()
+        self._entries: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def keys(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._entries)
+
+    def get_or_build(self, key: str, *, ttl_seconds: float, build: Callable[[], Any]) -> Any:
+        ttl = max(0.0, float(ttl_seconds))
+        if ttl <= 0:
+            return copy.deepcopy(build())
+        now = time.monotonic()
+        with self._lock:
+            stale_keys = [entry_key for entry_key, (expires_at, _value) in self._entries.items() if expires_at <= now]
+            for stale_key in stale_keys:
+                self._entries.pop(stale_key, None)
+            cached = self._entries.get(key)
+            if cached is not None:
+                self._entries.move_to_end(key)
+                return copy.deepcopy(cached[1])
+        value = build()
+        with self._lock:
+            self._entries[key] = (time.monotonic() + ttl, value)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+        return copy.deepcopy(value)
 
 
 def create_app(orchestrator: Any) -> Any:
@@ -105,6 +146,7 @@ def create_app(orchestrator: Any) -> Any:
         str(token).strip() for token in getattr(api_config, "auth_operator_tokens", []) if str(token).strip()
     }
     viewer_tokens = {str(token).strip() for token in getattr(api_config, "auth_viewer_tokens", []) if str(token).strip()}
+    websocket_ticket_secret = str(getattr(api_config, "auth_websocket_ticket_secret", "")).strip()
     # Precompute fixed-length digests so token verification can run in constant
     # time (no per-byte early exit that would leak a prefix-match length).
     operator_token_digests = tuple(
@@ -286,8 +328,7 @@ def create_app(orchestrator: Any) -> Any:
     taxii_collection_id = "clownpeanuts-intel"
     taxii_media_type = "application/stix+json;version=2.1"
     taxii_content_type = "application/taxii+json;version=2.1"
-    summary_cache_lock = threading.RLock()
-    summary_cache: dict[str, tuple[float, Any]] = {}
+    summary_cache = _BoundedTTLCache(max_entries=MAX_SUMMARY_CACHE_ENTRIES)
     canary_types = canary_type_catalog()
     canary_types_payload = {"types": canary_types, "count": len(canary_types)}
     default_intel_report_cache_ttl_seconds = max(
@@ -301,15 +342,7 @@ def create_app(orchestrator: Any) -> Any:
     rate_limit_refill_per_second = float(rate_limit_requests_per_minute) / 60.0
 
     def _summary_cache_get(key: str, *, ttl_seconds: float, build: Callable[[], Any]) -> Any:
-        now = time.monotonic()
-        with summary_cache_lock:
-            cached = summary_cache.get(key)
-            if cached and (now - cached[0]) <= ttl_seconds:
-                return copy.deepcopy(cached[1])
-        value = build()
-        with summary_cache_lock:
-            summary_cache[key] = (time.monotonic(), value)
-        return copy.deepcopy(value)
+        return summary_cache.get_or_build(key, ttl_seconds=ttl_seconds, build=build)
 
     def _normalize_path(path: str) -> str:
         normalized = f"/{str(path).strip().lstrip('/')}"
@@ -703,6 +736,32 @@ def create_app(orchestrator: Any) -> Any:
             return "viewer"
         return None
 
+    def _resolve_role_for_websocket_ticket(token: str | None) -> str | None:
+        if not token or not websocket_ticket_secret:
+            return None
+        parts = token.split(".")
+        if len(parts) != 4 or parts[0] != "cpws1":
+            return None
+        try:
+            expires_at = int(parts[1])
+        except ValueError:
+            return None
+        now = int(time.time())
+        if expires_at < now or expires_at > now + MAX_WEBSOCKET_TICKET_FUTURE_SECONDS:
+            return None
+        unsigned = ".".join(parts[:3])
+        expected = hmac.new(
+            websocket_ticket_secret.encode("utf-8"),
+            unsigned.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        try:
+            padding = "=" * ((4 - (len(parts[3]) % 4)) % 4)
+            supplied = base64.urlsafe_b64decode(f"{parts[3]}{padding}")
+        except Exception:
+            return None
+        return "operator" if hmac.compare_digest(expected, supplied) else None
+
     def _http_auth_role(request: Request) -> str | None:
         role = _resolve_role_for_token(_parse_bearer_token(request.headers.get("authorization")))
         if role is not None:
@@ -752,6 +811,8 @@ def create_app(orchestrator: Any) -> Any:
                 except Exception:
                     continue
                 role = _resolve_role_for_token(decoded_token.strip())
+                if role is None:
+                    role = _resolve_role_for_websocket_ticket(decoded_token.strip())
                 if role is not None:
                     return role
         return None

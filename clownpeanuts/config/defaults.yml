@@ -40,6 +40,7 @@ api:
     - "${CP_API_OPERATOR_TOKEN:-}"
   auth_viewer_tokens:
     - "${CP_API_VIEWER_TOKEN:-}"
+  auth_websocket_ticket_secret: "${CP_DASHBOARD_SESSION_SECRET:-}"
   allow_unauthenticated_health: ${CP_API_ALLOW_UNAUTHENTICATED_HEALTH:-true}
   rate_limit_enabled: ${CP_API_RATE_LIMIT_ENABLED:-false}
   rate_limit_requests_per_minute: ${CP_API_RATE_LIMIT_REQUESTS_PER_MINUTE:-240}

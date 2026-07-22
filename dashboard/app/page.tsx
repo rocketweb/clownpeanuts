@@ -424,19 +424,20 @@ export default function DashboardPage() {
       if (closed) {
         return
       }
-      void ensureDashboardAuthSession().finally(() => {
+      void ensureDashboardAuthSession().then(async () => {
         if (closed) {
           return
         }
+        const websocketAuth = await apiWebSocketProtocols()
         const wsUrl = withApiTokenQuery(
-          withQueryParams(WS_BASE, {
+          withQueryParams(`${websocketAuth.websocketBase}${WS_BASE}`, {
             format: "batch",
             batch_limit: "160",
             interval_ms: "350",
             cursor: String(streamCursorRef.current),
           })
         )
-        const protocols = apiWebSocketProtocols()
+        const protocols = websocketAuth.protocols
         ws = protocols.length > 0 ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl)
         ws.onopen = () => {
           setConnected(true)
@@ -505,7 +506,7 @@ export default function DashboardPage() {
             return
           }
         }
-      })
+      }).catch(() => undefined)
     }
 
     connect()

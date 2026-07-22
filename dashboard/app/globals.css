@@ -68,6 +68,124 @@ a {
   color: inherit;
 }
 
+.cp-login {
+  min-height: calc(100vh - var(--cp-header-total));
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(180px, 3fr);
+  background: var(--cp-card);
+}
+
+.cp-login-panel {
+  align-self: center;
+  width: min(620px, calc(100% - 3rem));
+  margin: 3rem auto;
+}
+
+.cp-kicker {
+  margin: 0 0 0.8rem;
+  color: var(--cp-accent-dark);
+  font-size: var(--cp-type-xs);
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.cp-login h1 {
+  max-width: 10ch;
+  margin: 0;
+  font-size: var(--cp-type-display);
+  line-height: 0.93;
+  letter-spacing: -0.035em;
+  text-transform: uppercase;
+}
+
+.cp-login-copy {
+  max-width: 46ch;
+  margin: 1.25rem 0 2rem;
+  color: var(--cp-muted);
+  font-size: var(--cp-type-md);
+}
+
+.cp-login-form {
+  display: grid;
+  gap: 0.55rem;
+  max-width: 440px;
+}
+
+.cp-login-form label {
+  margin-top: 0.6rem;
+  font-size: var(--cp-type-xs);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cp-login-form input {
+  width: 100%;
+  min-height: 48px;
+  border: 2px solid var(--cp-border);
+  border-radius: 0;
+  background: #ffffff;
+  color: var(--cp-text);
+  font: inherit;
+  padding: 0.7rem 0.8rem;
+}
+
+.cp-login-form input:focus-visible {
+  outline: 3px solid var(--cp-link);
+  outline-offset: 2px;
+}
+
+.cp-login-form button {
+  min-height: 50px;
+  margin-top: 1rem;
+  border: 2px solid var(--cp-border);
+  border-radius: 0;
+  background: var(--cp-accent);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.cp-login-form button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.cp-login-error {
+  margin: 0.7rem 0 0;
+  color: var(--cp-bad);
+  font-weight: 700;
+}
+
+.cp-login-mark {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  overflow: hidden;
+  background: var(--cp-accent);
+  color: #ffffff;
+  font-size: clamp(7rem, 18vw, 18rem);
+  font-weight: 900;
+  line-height: 0.72;
+  letter-spacing: -0.12em;
+  padding: 1rem;
+}
+
+@media (max-width: 760px) {
+  .cp-login {
+    grid-template-columns: 1fr;
+  }
+
+  .cp-login-mark {
+    min-height: 150px;
+    font-size: 8rem;
+  }
+}
+
 .cp-shell {
   width: min(100%, var(--cp-shell-max));
   margin-inline: auto;
@@ -219,6 +337,11 @@ a {
   border-bottom-color: var(--cp-accent);
   background: transparent;
   color: #111826;
+}
+
+.cp-logout {
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .cp-topbar-link-muted {

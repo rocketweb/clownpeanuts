@@ -11,6 +11,10 @@ DASH_HOST="${DEMO_DASH_HOST:-127.0.0.1}"
 DASH_PORT="${DEMO_DASH_PORT:-3001}"
 SSH_PORT="${DEMO_SSH_PORT:-3222}"
 HTTP_PORT="${DEMO_HTTP_PORT:-28080}"
+DASH_USERNAME="${DEMO_DASH_USERNAME:-operator}"
+DASH_PASSWORD="${DEMO_DASH_PASSWORD:-clownpeanuts-demo-password}"
+API_TOKEN="${DEMO_API_TOKEN:-clownpeanuts-demo-operator-token-0123456789}"
+SESSION_SECRET="${DEMO_SESSION_SECRET:-clownpeanuts-demo-session-secret-0123456789abcdef}"
 
 API_PID_FILE="${STATE_DIR}/api.pid"
 DASH_PID_FILE="${STATE_DIR}/dashboard.pid"
@@ -79,6 +83,9 @@ config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 PY
 
 echo "starting demo api on ${API_HOST}:${API_PORT}"
+CP_API_AUTH_ENABLED=true \
+CP_API_OPERATOR_TOKEN="${API_TOKEN}" \
+CP_DASHBOARD_SESSION_SECRET="${SESSION_SECRET}" \
 nohup "${ROOT_DIR}/.venv/bin/clownpeanuts" \
   api \
   --config "${CONFIG_PATH}" \
@@ -105,9 +112,12 @@ fi
 echo "starting demo dashboard on ${DASH_HOST}:${DASH_PORT}"
 (
   cd "${ROOT_DIR}/dashboard"
-  NEXT_PUBLIC_CLOWNPEANUTS_API="http://${API_HOST}:${API_PORT}" \
-  NEXT_PUBLIC_CLOWNPEANUTS_WS="ws://${API_HOST}:${API_PORT}/ws/events" \
-  NEXT_PUBLIC_CLOWNPEANUTS_WS_THEATER="ws://${API_HOST}:${API_PORT}/ws/theater/live" \
+  CLOWNPEANUTS_API_INTERNAL_URL="http://${API_HOST}:${API_PORT}" \
+  CLOWNPEANUTS_API_TOKEN="${API_TOKEN}" \
+  CLOWNPEANUTS_DASHBOARD_USERNAME="${DASH_USERNAME}" \
+  CLOWNPEANUTS_DASHBOARD_PASSWORD="${DASH_PASSWORD}" \
+  CLOWNPEANUTS_DASHBOARD_SESSION_SECRET="${SESSION_SECRET}" \
+  CLOWNPEANUTS_PUBLIC_WS_BASE="ws://${API_HOST}:${API_PORT}" \
   nohup npm run dev -- --hostname "${DASH_HOST}" --port "${DASH_PORT}" >"${DASH_LOG_FILE}" 2>&1 &
   echo $! > "${DASH_PID_FILE}"
 )
@@ -132,7 +142,7 @@ curl -fsS "http://127.0.0.1:${HTTP_PORT}/api/internal/orders" >/dev/null 2>&1 ||
 curl -fsS "http://127.0.0.1:${HTTP_PORT}/api/internal/search?q=invoice&page=2&page_size=9" >/dev/null 2>&1 || true
 curl -fsS -X POST "http://127.0.0.1:${HTTP_PORT}/admin" -d "username=admin&password=letmein" >/dev/null 2>&1 || true
 
-session_payload="$(curl -fsS "http://${API_HOST}:${API_PORT}/sessions?limit=1&events_per_session=20" || true)"
+session_payload="$(curl -fsS -H "Authorization: Bearer ${API_TOKEN}" "http://${API_HOST}:${API_PORT}/sessions?limit=1&events_per_session=20" || true)"
 session_id="$(
   SESSION_PAYLOAD="${session_payload}" "${ROOT_DIR}/.venv/bin/python" - <<'PY'
 from __future__ import annotations
@@ -168,6 +178,7 @@ echo "demo stack is ready"
 echo "api:          http://${API_HOST}:${API_PORT}"
 echo "dashboard:    http://${DASH_HOST}:${DASH_PORT}"
 echo "theater:      http://${DASH_HOST}:${DASH_PORT}/theater"
+echo "login:        ${DASH_USERNAME} / ${DASH_PASSWORD}"
 if [[ -n "${session_id}" ]]; then
   echo "replay:       http://${DASH_HOST}:${DASH_PORT}/theater/replay/${session_id}"
 fi

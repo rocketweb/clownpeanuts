@@ -6,6 +6,8 @@ _Multi-agent audit: 29 reviewers (24 subsystem + 5 cross-cutting vuln-class swee
 
 All confirmed findings were addressed on the `hdl/hardening` branch. Test baseline before changes: 568 passed, 1 skipped, 4 failed (the 4 failures are a pre-existing environment artifact: a real Redis is reachable on 127.0.0.1:6379, so the "redis unavailable" fallback tests do not trigger; unrelated to this work). After changes: 606 passed, 1 skipped, same 4 environment failures, with 38 new regression tests.
 
+Post-review follow-up (2026-07-22): Redis URLs now reject explicit port `0`, making those fallback tests hermetic; the dashboard-auth G3 architecture was fully replaced with credential login, signed sessions, same-origin proxying, and short-lived WebSocket tickets. Current suite: `637 passed, 1 skipped`.
+
 | ID | Finding | Status | Where |
 | --- | --- | --- | --- |
 | H1 | Unauthenticated SSRF + file read via dirtylaundry share | Fixed | new `core/safe_fetch.py` (scheme allow-list, IP validation, no redirects, no file://, DNS-rebind re-resolve), applied in `agents/dirtylaundry/sharing.py`; config opt-in `agents.dirtylaundry.sharing.allow_private_endpoint` |
@@ -189,7 +191,7 @@ These were surfaced by the completeness critic and were investigated and resolve
 | --- | --- | --- |
 | G1 ReDoS via classifier regexes | Lower than stated (regex is from Ed25519-signed/trust-verified packs or operator config, not attacker-controlled; input capped at 8 KiB; dirtylaundry shares profiles, not packs) | Added a conservative compile-time nested-quantifier lint in `personas/traps/classifier.py` as defense-in-depth |
 | G2 second CSV injection sink (export.py) | Real, same class as M4 | Fixed in this PR via the `SafeDictWriter` rollout |
-| G3 dashboard cookie minting | Real: the session route GET minted an operator-token cookie to any visitor | Made token minting POST-only in `dashboard/app/api/auth/session/route.ts`; the broader same-origin-proxy / always-secure-cookie redesign is recommended but left to the maintainer (architecture change) |
+| G3 dashboard cookie minting | Real: the session route minted an operator-token cookie without authenticating the visitor | Resolved: username/password login now creates a signed dashboard-only session, HTTP uses a same-origin server proxy, and WebSockets use short-lived signed tickets; the API token never enters browser JavaScript or cookies |
 | G4 docker-compose ops auth wiring | Real: the `api` service binds 0.0.0.0 without auth env, so the fail-closed guard blocks startup | Added `CP_API_AUTH_ENABLED=true` + `CP_API_OPERATOR_TOKEN` to the `api` service |
 | G5 DNS-rebind residual (SIEM/rotation) | Accepted residual: the endpoints are operator config, not attacker-controlled (the structurally identical hosted.py finding was rejected during verification). A true fix needs IP-pinning across all outbound paths (http+https with TLS SNI), a risky cross-cutting refactor | Documented; deferred to a maintainer decision |
 

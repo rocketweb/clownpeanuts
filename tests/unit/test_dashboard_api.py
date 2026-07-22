@@ -5,11 +5,37 @@ import pytest
 
 from clownpeanuts.config.schema import parse_config
 from clownpeanuts.core.orchestrator import Orchestrator
-from clownpeanuts.dashboard.api import create_app
+from clownpeanuts.dashboard.api import _BoundedTTLCache, create_app
 
 
 OPERATOR_TOKEN = "operator-token-0123456789abcdef"
 VIEWER_TOKEN = "viewer-token-0123456789abcdef"
+
+
+def test_bounded_ttl_cache_evicts_expired_and_overflow_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("clownpeanuts.dashboard.api.time.monotonic", lambda: clock[0])
+    cache = _BoundedTTLCache(max_entries=2)
+
+    assert cache.get_or_build("one", ttl_seconds=10.0, build=lambda: {"value": 1}) == {"value": 1}
+    assert cache.get_or_build("two", ttl_seconds=10.0, build=lambda: {"value": 2}) == {"value": 2}
+    assert len(cache) == 2
+
+    cache.get_or_build("three", ttl_seconds=10.0, build=lambda: {"value": 3})
+    assert len(cache) == 2
+    assert cache.keys() == ("two", "three")
+
+    clock[0] = 111.0
+    cache.get_or_build("four", ttl_seconds=10.0, build=lambda: {"value": 4})
+    assert len(cache) == 1
+    assert cache.keys() == ("four",)
+
+
+def test_bounded_ttl_cache_does_not_store_when_disabled() -> None:
+    cache = _BoundedTTLCache(max_entries=2)
+
+    assert cache.get_or_build("disabled", ttl_seconds=0.0, build=lambda: {"value": 1}) == {"value": 1}
+    assert len(cache) == 0
 
 
 def _encode_ws_token(token: str) -> str:

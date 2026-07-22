@@ -13,6 +13,7 @@ from urllib.parse import urlparse, urlunparse
 
 from clownpeanuts.config.schema import SessionConfig
 from clownpeanuts.core.logging import get_logger
+from clownpeanuts.core.redis_url import validate_redis_url
 
 
 @dataclass(slots=True)
@@ -197,6 +198,7 @@ class SessionManager:
         try:
             import redis  # type: ignore[import-not-found]
 
+            validate_redis_url(self.config.redis_url)
             safe_redis_url = self._redact_redis_url(self.config.redis_url)
             client = redis.Redis.from_url(
                 self.config.redis_url,

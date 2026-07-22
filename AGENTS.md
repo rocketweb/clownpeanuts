@@ -21,7 +21,7 @@ This repository is intended to be executable by new coding agents without prior 
 - FastAPI operations backend and Next.js dashboard are implemented.
 - Optional ecosystem integration APIs are implemented and gated behind `ecosystem.enabled`.
 - Docker Compose profiles are wired for local bootstrap (`core`) and full operator stack (`ops`).
-- Expanded test coverage exists under `/tests` (current baseline: `443 passed`).
+- Expanded test coverage exists under `/tests` (current baseline: `637 passed, 1 skipped`).
 
 ## Constraints
 

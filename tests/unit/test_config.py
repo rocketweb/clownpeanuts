@@ -35,6 +35,7 @@ def test_load_defaults() -> None:
     assert config.api.auth_enabled is False
     assert config.api.auth_operator_tokens == []
     assert config.api.auth_viewer_tokens == []
+    assert config.api.auth_websocket_ticket_secret == ""
     assert config.api.allow_unauthenticated_health is True
     assert config.api.rate_limit_enabled is False
     assert config.api.rate_limit_requests_per_minute == 240
@@ -83,6 +84,20 @@ def test_load_defaults() -> None:
     assert any(service.name == "memcached-db" for service in config.services)
     assert any(destination.destination_type == "email" for destination in config.alerts.destinations)
     assert any(destination.destination_type == "pagerduty" for destination in config.alerts.destinations)
+
+
+@pytest.mark.parametrize("section", ["session", "event_bus"])
+def test_redis_backend_rejects_port_zero(section: str) -> None:
+    with pytest.raises(ValueError, match=rf"{section} redis_url port must be between 1 and 65535"):
+        parse_config(
+            {
+                "services": [],
+                section: {
+                    "backend": "redis",
+                    "redis_url": "redis://127.0.0.1:0/0",
+                },
+            }
+        )
 
 
 def test_load_production_hardened_profile(monkeypatch: pytest.MonkeyPatch) -> None:

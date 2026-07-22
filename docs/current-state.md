@@ -1,6 +1,6 @@
 # Current State Snapshot
 
-Date: **February 22, 2026**
+Date: **July 22, 2026**
 
 This document is the current capability and validation inventory for ClownPeanuts at repository head. It is intentionally concrete and operationally focused: if a feature is described here, it exists in code today. For deployment and operational procedure details, use `user-guide.md`.
 
@@ -208,7 +208,7 @@ FastAPI (`clownpeanuts/dashboard/api.py`):
 - Intel report cache behavior is tunable via `api.intel_report_cache_ttl_seconds` (set to `0` to disable cache reuse).
 - API hardening controls via config (`api.docs_enabled`, `api.cors_allow_origins`, `api.trusted_hosts`, `api.auth_enabled`, operator/viewer tokens, `api.rate_limit_*`, `api.max_request_body_bytes`).
 - Bundled runtime profiles now require explicit Redis credentials via `CP_REDIS_PASSWORD` interpolation (including `clownpeanuts/config/defaults.yml`) for Redis-backed session/event-bus URLs.
-- Dashboard server route `/api/auth/session` now bootstraps browser auth via httpOnly `cp_api_token` cookie sourced from `CLOWNPEANUTS_API_TOKEN`, and API/websocket auth accepts that cookie token in addition to header/subprotocol paths.
+- Dashboard login requires a configured username/password pair and creates a signed HttpOnly dashboard session. Browser HTTP traffic uses an authenticated same-origin proxy that keeps the operator API token server-side; WebSockets use 60-second HMAC tickets validated by the API.
 - API middleware enforces request-size caps on mutation methods using `api.max_request_body_bytes` and returns HTTP `413` for oversized request bodies, including fallback size checks when `Content-Length` is missing or malformed.
 - API startup now defensively rejects wildcard CORS with credentials (`api.cors_allow_credentials=true` with `api.cors_allow_origins` containing `*`) even when app config is constructed programmatically outside parser validation.
 - `doctor` diagnostics include explicit Redis backend auth checks for both `session` and `event_bus` when configured in Redis mode, plus production API hardening posture checks including required API auth + non-empty operator tokens, minimum token-length enforcement (`>=24`) for operator/viewer tokens, rejection of placeholder API tokens (`replace-with-*`/`change-me` style values), required role-separated operator/viewer token sets, required authenticated health posture (`api.allow_unauthenticated_health=false`), required API rate limiting, bounded request-body limits, restrictive rate-limit exemption paths, bounded rate-limit burst posture (`rate_limit_burst <= rate_limit_requests_per_minute`), and bounded sustained production rate caps (`rate_limit_requests_per_minute <= 5000`).
@@ -260,15 +260,15 @@ Dashboard (`/dashboard`):
 
 ## Validation Baseline (Latest Local Run)
 
-Executed on **February 21, 2026**:
+Executed on **July 22, 2026**:
 
 1. Python tests
    - Command: `.venv/bin/pytest`
-   - Result: `449 passed`
+   - Result: `637 passed, 1 skipped`
 
 2. Dashboard production build
    - Command: `cd dashboard && npm run build`
-   - Result: success, all app routes compiled (`/`, `/theater`, `/theater/replay/[sessionId]`).
+   - Result: success on Next.js 16.2.11, including login, authenticated proxy, WebSocket-ticket, Operations, Theater, and replay routes.
 
 3. Runtime smoke (default config)
    - Command: `.venv/bin/clownpeanuts up --once --config clownpeanuts/config/defaults.yml`

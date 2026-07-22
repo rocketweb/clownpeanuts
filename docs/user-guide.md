@@ -272,6 +272,7 @@ api:
     - "${CP_API_OPERATOR_TOKEN:-}"
   auth_viewer_tokens:
     - "${CP_API_VIEWER_TOKEN:-}"
+  auth_websocket_ticket_secret: "${CP_DASHBOARD_SESSION_SECRET:-}"
   allow_unauthenticated_health: true
   rate_limit_enabled: false
   rate_limit_requests_per_minute: 240
@@ -291,6 +292,7 @@ api:
 | `auth_enabled` | bool | `false` | Enables API token authentication for HTTP and websocket endpoints. |
 | `auth_operator_tokens` | list | `[]` | Operator tokens. Required for mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) when auth is enabled; production `doctor` checks also require at least one non-empty entry when `api.auth_enabled=true`, require token length `>=24`, reject placeholder values like `replace-with-*`, and enforce separation from `auth_viewer_tokens` values. |
 | `auth_viewer_tokens` | list | `[]` | Viewer tokens. Allowed for read-only HTTP/websocket access when auth is enabled; production `doctor` checks require non-placeholder values and minimum length `>=24` when viewer tokens are configured. |
+| `auth_websocket_ticket_secret` | string | `""` | Shared HMAC secret used only for short-lived dashboard WebSocket tickets. Set it to the same value as `CLOWNPEANUTS_DASHBOARD_SESSION_SECRET`; minimum 32 characters. |
 | `allow_unauthenticated_health` | bool | `true` | Keeps `/health` open without a token. Set `false` to require auth on health checks too; production `doctor` hardening checks require this to be `false`. |
 | `rate_limit_enabled` | bool | `false` | Enables built-in API + websocket client rate limiting. Returns HTTP `429` with `Retry-After` when exceeded and rejects new websocket connections with rate-limit close codes. |
 | `rate_limit_requests_per_minute` | int | `240` | Sustained refill rate per client identity (IP or `X-Forwarded-For` first-hop value). Production hardening diagnostics require this to remain `<= 5000`. |
@@ -298,7 +300,7 @@ api:
 | `rate_limit_exempt_paths` | list | `["/health"]` | Paths excluded from API/websocket rate limiting. Use this sparingly (health/liveness endpoints only in most deployments). Wildcard entries are rejected and the list is capped at 16 entries. |
 | `max_request_body_bytes` | int | `262144` | Maximum allowed HTTP request body size for mutating API methods (`POST`, `PUT`, `PATCH`, `DELETE`). Requests above the limit return HTTP `413`. |
 
-When API auth is enabled, set `NEXT_PUBLIC_CLOWNPEANUTS_API_TOKEN` in the dashboard environment so browser fetch/websocket requests include the token automatically.
+The local dashboard never exposes the API token to browser JavaScript. Configure `CLOWNPEANUTS_API_TOKEN`, `CLOWNPEANUTS_DASHBOARD_USERNAME`, `CLOWNPEANUTS_DASHBOARD_PASSWORD`, and `CLOWNPEANUTS_DASHBOARD_SESSION_SECRET` on the dashboard server. Set `CP_DASHBOARD_SESSION_SECRET` to the same secret on the API so it can validate short-lived WebSocket tickets.
 The CLI also refuses non-loopback API binds (for example `--host 0.0.0.0`) unless `api.auth_enabled` is set to `true`.
 
 ### 5.5 Logging (`logging`)
@@ -819,15 +821,29 @@ For multi-tenant mode, specify which tenant's configuration to use:
 
 **Start the API server:**
 
+Export one API token and one shared dashboard session/ticket secret first. Use the same values when starting the dashboard:
+
+```bash
+export CP_API_AUTH_ENABLED=true
+export CP_API_OPERATOR_TOKEN="replace-with-long-random-token"
+export CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters"
+```
+
 If you want the API server without in-process emulators (you're running emulators separately or via Docker):
 
 ```bash
+CP_API_AUTH_ENABLED=true \
+CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 .venv/bin/clownpeanuts api --config ./config/clownpeanuts.yml --host 127.0.0.1 --port 8099
 ```
 
 If you want the API server *and* emulators in the same process (simpler for development):
 
 ```bash
+CP_API_AUTH_ENABLED=true \
+CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 .venv/bin/clownpeanuts api --config ./config/clownpeanuts.yml --host 127.0.0.1 --port 8099 --start-services
 ```
 
@@ -836,14 +852,16 @@ If you want the API server *and* emulators in the same process (simpler for deve
 ```bash
 cd dashboard
 npm install
+CLOWNPEANUTS_API_INTERNAL_URL="http://127.0.0.1:8099" \
+CLOWNPEANUTS_API_TOKEN="replace-with-long-random-token" \
+CLOWNPEANUTS_DASHBOARD_USERNAME="operator" \
+CLOWNPEANUTS_DASHBOARD_PASSWORD="replace-with-a-strong-password" \
+CLOWNPEANUTS_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
+CLOWNPEANUTS_PUBLIC_WS_BASE="ws://127.0.0.1:8099" \
 npm run dev
 ```
 
-The dashboard connects to:
-- API: `http://127.0.0.1:8099` (override with `NEXT_PUBLIC_CLOWNPEANUTS_API`)
-- WebSocket events: `ws://127.0.0.1:8099/ws/events` (override with `NEXT_PUBLIC_CLOWNPEANUTS_WS`)
-- Theater live stream: `ws://127.0.0.1:8099/ws/theater/live` (requested by the Theater page via the configured API base URL)
-- Optional API token: set `NEXT_PUBLIC_CLOWNPEANUTS_API_TOKEN` when `api.auth_enabled: true`
+The browser sends HTTP requests only to the dashboard origin. The dashboard server proxies them to `CLOWNPEANUTS_API_INTERNAL_URL` and attaches `CLOWNPEANUTS_API_TOKEN`. WebSocket clients obtain a 60-second ticket and connect through `CLOWNPEANUTS_PUBLIC_WS_BASE`; if that value is omitted, the dashboard derives the current browser hostname and `CLOWNPEANUTS_PUBLIC_WS_PORT` (default `8099`).
 
 Primary dashboard routes after startup:
 - `http://127.0.0.1:3000/` -- main operations dashboard
@@ -885,19 +903,18 @@ Then open `http://127.0.0.1:3000` in your browser.
 
 ### 7.3 Docker Compose
 
-**Full stack** (API with emulators + dashboard + Redis):
-
-```bash
-docker compose --profile ops up --build
-```
-
-The `ops` profile enables API auth and Redis AUTH by default. Set `CP_API_OPERATOR_TOKEN` and `CP_REDIS_PASSWORD` before startup if you want custom secrets:
+**Full stack** (API with emulators + credential-gated dashboard + Redis):
 
 ```bash
 CP_API_OPERATOR_TOKEN="replace-with-long-random-token" \
 CP_REDIS_PASSWORD="replace-with-strong-redis-password" \
+CP_DASHBOARD_USERNAME="operator" \
+CP_DASHBOARD_PASSWORD="replace-with-a-strong-password" \
+CP_DASHBOARD_SESSION_SECRET="replace-with-at-least-32-random-characters" \
 docker compose --profile ops up --build
 ```
+
+The `ops` profile requires all five values shown above. The password must contain at least 12 characters and the session secret at least 32.
 
 **Core only** (emulators + Redis, no dashboard):
 
@@ -1540,8 +1557,8 @@ sudo systemctl status clownpeanuts
 **What's happening**: The dashboard can't connect to the API or WebSocket endpoint.
 
 **Fix**:
-1. Check that the environment variables `NEXT_PUBLIC_CLOWNPEANUTS_API` and `NEXT_PUBLIC_CLOWNPEANUTS_WS` point to the correct addresses. In local development, the defaults (`http://127.0.0.1:8099` and `ws://127.0.0.1:8099/ws/events`) should work.
-2. If API auth is enabled (`api.auth_enabled: true`), set `NEXT_PUBLIC_CLOWNPEANUTS_API_TOKEN` to a valid operator/viewer token.
+1. Confirm `CLOWNPEANUTS_API_INTERNAL_URL` is reachable from the dashboard server/container and `CLOWNPEANUTS_PUBLIC_WS_BASE` is reachable from the operator's browser.
+2. Confirm the dashboard's `CLOWNPEANUTS_API_TOKEN` matches an API operator token and `CLOWNPEANUTS_DASHBOARD_SESSION_SECRET` matches the API's `CP_DASHBOARD_SESSION_SECRET`.
 3. Watch the stream badges:
    - `EVENT STREAM LIVE` / `THEATER STREAM LIVE` means websocket is connected.
    - `RECONNECT n (Xs)` means client backoff is active and automatic reconnect is in progress.
@@ -1598,7 +1615,7 @@ sudo systemctl status clownpeanuts
 4. If API works but UI still shows degraded:
    - use `refresh now` in replay page,
    - then hard-refresh the browser tab,
-   - then verify `NEXT_PUBLIC_CLOWNPEANUTS_API` points to the intended API instance.
+   - then verify `CLOWNPEANUTS_API_INTERNAL_URL` points to the intended API instance.
 
 ### Theater apply-lure requests return validation errors
 

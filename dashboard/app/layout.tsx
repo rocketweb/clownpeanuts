@@ -1,6 +1,7 @@
 import "./globals.css"
 import type { Metadata } from "next"
 import Link from "next/link"
+import { LogoutButton } from "./logout-button"
 
 export const metadata: Metadata = {
   title: "ClownPeanuts Ops",
@@ -40,6 +41,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </Link>
                 <span className="cp-topbar-link cp-topbar-link-muted">Intel</span>
                 <span className="cp-topbar-link cp-topbar-link-muted">Retention</span>
+                <LogoutButton />
               </nav>
             </header>
             <div className="cp-content">{children}</div>
